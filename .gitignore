@@ -99,3 +99,7 @@ protected/tests
 protected/runtime/application.log
 classic/test
 tests
+
+# trunkcaps fork: keep our unit tests under version control
+!protected/tests
+.phpunit.result.cache

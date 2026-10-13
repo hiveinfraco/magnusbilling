@@ -105,3 +105,12 @@ Changes from the first draft, and why:
 2. **Migrations:** separate track. `TrunkCapSchema` is versioned by `pkg_configuration.trunkcaps_schema_version` and called by one line in `UpdateMysqlCommand::run()`. It can also be run by hand: `php cron.php TrunkCapMigrate [status|up|down confirm]`.
 3. **After-dial hook:** add the `AftersendCalltoTrunk.php` include (~5 lines) in `CalcAgi::sendCall`.
 4. The spec's §10 open questions still stand. They only affect defaults.
+
+## 8. Window semantics (implemented in `TrunkCapWindow`)
+
+- Period boundaries use the policy timezone. Hourly periods use UTC-offset arithmetic, so DST and half-hour zones are handled. Daily, weekly and monthly periods start at local midnight. Weeks start on Monday.
+- `billing_day` + month: if the reset day doesn't exist in a month, it moves to that month's last day (reset 31 → Feb 28/29, Apr 30).
+- Calendar `custom` periods are aligned to the Unix epoch in UTC.
+- Rolling periods sum the 1-minute buckets, including the current minute. **ASSUMPTION:** a rolling "month" is 30 days.
+- Time-of-day windows include the start time and exclude the end time. An overnight window (e.g. 22:00–06:00) counts as the weekday it opens on.
+- A call is counted in the period and window where it **starts**. A call that crosses a period boundary is charged entirely to the period it started in.
