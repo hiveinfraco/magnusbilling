@@ -87,6 +87,7 @@ class TrunkCapSchema
         $this->say('Removed the Trunk Caps menu entries.');
 
         foreach ([
+            'pkg_trunk_cap_statement',
             'pkg_trunk_cap_event',
             'pkg_trunk_cap_reservation',
             'pkg_trunk_cap_lock',
@@ -98,9 +99,9 @@ class TrunkCapSchema
             $this->say('Dropped ' . $table . '.');
         }
 
-        $this->db->createCommand("DELETE FROM pkg_configuration WHERE config_key IN (:key, 'trunkcaps_alert_email')")
+        $this->db->createCommand("DELETE FROM pkg_configuration WHERE config_key = :key OR config_key LIKE 'trunkcaps\\_%'")
             ->execute([':key' => self::VERSION_KEY]);
-        $this->say('Removed ' . self::VERSION_KEY . ' and trunkcaps_alert_email.');
+        $this->say('Removed the trunkcaps_* settings.');
 
         if (file_exists(self::CRON_FILE) && @unlink(self::CRON_FILE)) {
             $this->say('Removed ' . self::CRON_FILE . '.');
@@ -114,7 +115,56 @@ class TrunkCapSchema
             [$this, 'step2ReservationAccounting'],
             [$this, 'step3SweepAndAlerts'],
             [$this, 'step4PanelModules'],
+            [$this, 'step5TelegramAndReconciliation'],
         ];
+    }
+
+    /**
+     * Telegram alerts (per-channel delivery tracking), provider statements for
+     * the monthly reconciliation report, its menu entry and its cron line.
+     */
+    private function step5TelegramAndReconciliation()
+    {
+        if (! $this->columnExists('pkg_trunk_cap_event', 'telegram_at')) {
+            $this->db->createCommand(
+                'ALTER TABLE `pkg_trunk_cap_event` ADD `telegram_at` datetime DEFAULT NULL AFTER `notified_at`,
+                 ADD KEY `idx_event_telegram` (`event`, `telegram_at`)'
+            )->execute();
+        }
+
+        $this->db->createCommand(
+            "CREATE TABLE IF NOT EXISTS `pkg_trunk_cap_statement` (
+              `id` int NOT NULL AUTO_INCREMENT,
+              `id_trunk` int NOT NULL,
+              `period_start` date NOT NULL,
+              `period_end` date NOT NULL COMMENT 'inclusive',
+              `timezone` varchar(64) NOT NULL DEFAULT 'Africa/Lagos' COMMENT 'zone the provider statement uses',
+              `provider_minutes` decimal(14,2) NOT NULL,
+              `provider_calls` int DEFAULT NULL,
+              `note` varchar(255) NOT NULL DEFAULT '',
+              `id_user` int DEFAULT NULL,
+              `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (`id`),
+              KEY `idx_trunk_period` (`id_trunk`, `period_start`),
+              CONSTRAINT `fk_pkg_trunk_cap_statement_pkg_trunk` FOREIGN KEY (`id_trunk`) REFERENCES `pkg_trunk` (`id`) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3"
+        )->execute();
+
+        $settings = [
+            ['Trunk caps Telegram bot token', 'trunkcaps_telegram_bot_token', '', 'Bot token from @BotFather for trunk cap alerts. Leave empty to disable Telegram.'],
+            ['Trunk caps Telegram chat ID', 'trunkcaps_telegram_chat_id', '', 'Chat, group or channel ID that receives trunk cap alerts.'],
+            ['Trunk caps reconciliation tolerance %', 'trunkcaps_reconcile_tolerance_pct', '2', 'Allowed difference between our minutes and the provider statement before it is flagged.'],
+        ];
+        foreach ($settings as $s) {
+            $this->db->createCommand(
+                "INSERT INTO pkg_configuration (config_title, config_key, config_value, config_description, config_group_title, status)
+                 SELECT :title, :key, :value, :description, 'global', 1 FROM DUAL
+                 WHERE NOT EXISTS (SELECT 1 FROM pkg_configuration WHERE config_key = :existing)"
+            )->execute([':title' => $s[0], ':key' => $s[1], ':value' => $s[2], ':description' => $s[3], ':existing' => $s[1]]);
+        }
+
+        $this->addModules(['trunkcapstatement' => self::modules()['trunkcapstatement']]);
+        $this->installCron();
     }
 
     /** Admin menu entries under Routes, the policy pause column. */
@@ -127,7 +177,13 @@ class TrunkCapSchema
             )->execute();
         }
 
-        foreach (self::modules() as $module => $m) {
+        $this->addModules(array_diff_key(self::modules(), ['trunkcapstatement' => 1]));
+        $this->say('Added the Trunk Caps menu entries for the administrator group. Users must log in again to see them.');
+    }
+
+    private function addModules(array $modules)
+    {
+        foreach ($modules as $module => $m) {
             $this->db->createCommand(
                 "INSERT INTO pkg_module (text, module, icon_cls, id_module, priority)
                  SELECT :text, :module, :icon, 10, :priority FROM DUAL
@@ -142,7 +198,6 @@ class TrunkCapSchema
                    AND NOT EXISTS (SELECT 1 FROM pkg_group_module gm WHERE gm.id_group = 1 AND gm.id_module = m.id)"
             )->execute([':action' => $m[3], ':module' => $module]);
         }
-        $this->say('Added the Trunk Caps menu entries for the administrator group. Users must log in again to see them.');
     }
 
     /** module => [menu text, icon, priority under Routes, admin action] */
@@ -152,6 +207,7 @@ class TrunkCapSchema
             'trunkcappolicy' => ["t('Trunk Caps')", 'x-fa fa-tachometer', 4, 'crud'],
             'trunkcapusage'  => ["t('Trunk Cap Usage')", 'x-fa fa-bar-chart', 5, 'r'],
             'trunkcapevent'  => ["t('Trunk Cap Log')", 'x-fa fa-list', 6, 'r'],
+            'trunkcapstatement' => ["t('Trunk Cap Reconciliation')", 'x-fa fa-balance-scale', 7, 'crud'],
         ];
     }
 
@@ -189,6 +245,8 @@ class TrunkCapSchema
             self::CRON_FILE,
             "# MagnusBilling trunk caps: release stale reservations, send cap warnings\n"
                 . "* * * * * root flock -n /tmp/trunkcaps-sweep.lock php /var/www/html/mbilling/cron.php TrunkCapSweep >/dev/null 2>&1\n"
+                . "# previous month's reconciliation report, on the 2nd at 07:00 server time\n"
+                . "0 7 2 * * root php /var/www/html/mbilling/cron.php TrunkCapReconcile send >/dev/null 2>&1\n"
         );
         chmod(self::CRON_FILE, 0644);
         $this->say('Installed ' . self::CRON_FILE . '.');

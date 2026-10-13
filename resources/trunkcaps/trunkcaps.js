@@ -112,7 +112,27 @@
             proxy: { type: 'uxproxy', module: 'trunkCapEvent' }
         });
 
-        Ext.each(['TrunkCapPolicy', 'TrunkCapUsage', 'TrunkCapEvent'], function (name) {
+        Ext.define('MBilling.model.TrunkCapStatement', {
+            extend: 'Ext.data.Model',
+            fields: [
+                { name: 'id', type: 'int' },
+                { name: 'id_trunk', type: 'int' },
+                { name: 'idTrunktrunkcode', type: 'string', persist: false },
+                { name: 'period_start', type: 'date', dateFormat: 'Y-m-d', dateWriteFormat: 'Y-m-d' },
+                { name: 'period_end', type: 'date', dateFormat: 'Y-m-d', dateWriteFormat: 'Y-m-d' },
+                { name: 'timezone', type: 'string', defaultValue: 'Africa/Lagos' },
+                { name: 'provider_minutes', type: 'number' },
+                nullableInt('provider_calls'),
+                { name: 'note', type: 'string' },
+                { name: 'our_minutes', persist: false }, { name: 'our_real_minutes', persist: false },
+                { name: 'our_calls', persist: false }, { name: 'failed_attempts', persist: false },
+                { name: 'counter_minutes', persist: false }, { name: 'diff_pct', persist: false },
+                { name: 'status', persist: false }
+            ],
+            proxy: { type: 'uxproxy', module: 'trunkCapStatement' }
+        });
+
+        Ext.each(['TrunkCapPolicy', 'TrunkCapUsage', 'TrunkCapEvent', 'TrunkCapStatement'], function (name) {
             Ext.define('MBilling.store.' + name, { extend: 'Ext.data.Store', model: 'MBilling.model.' + name });
             if (!Ext.data.StoreManager.lookup(name)) {
                 Ext.create('MBilling.store.' + name, { storeId: name, remoteSort: true, remoteFilter: true });
@@ -621,6 +641,94 @@
                         }
                     }
                 ];
+                me.callParent(arguments);
+            }
+        });
+
+        // ---- Trunk Cap Reconciliation (provider statements) --------------------
+
+        Ext.define('MBilling.view.trunkCapStatement.Module', {
+            extend: 'Ext.ux.panel.Module',
+            alias: 'widget.trunkcapstatementmodule',
+            controller: 'trunkcapstatement'
+        });
+
+        Ext.define('MBilling.view.trunkCapStatement.Controller', {
+            extend: 'Ext.ux.app.ViewController',
+            alias: 'controller.trunkcapstatement'
+        });
+
+        Ext.define('MBilling.view.trunkCapStatement.List', {
+            extend: 'Ext.ux.grid.Panel',
+            alias: 'widget.trunkcapstatementlist',
+            store: 'TrunkCapStatement',
+            fieldSearch: 'idTrunk.trunkcode',
+            initComponent: function () {
+                var me = this,
+                    num = function (v, d) { return v === null || v === undefined ? '' : Ext.util.Format.number(v, d || '0,000.0'); };
+                me.buttonUpdateLot = false;
+                me.columns = [{
+                    header: t('Trunk'), dataIndex: 'idTrunktrunkcode', flex: 2,
+                    filter: { type: 'string', field: 'idTrunk.trunkcode' }
+                }, {
+                    header: t('Period'), dataIndex: 'period_start', flex: 2.4,
+                    renderer: function (v, m, r) { return Ext.Date.format(v, 'Y-m-d') + ' → ' + Ext.Date.format(r.get('period_end'), 'Y-m-d'); }
+                }, {
+                    header: t('Our minutes'), dataIndex: 'our_minutes', flex: 1.4, sortable: false,
+                    renderer: function (v, m, r) {
+                        m.tdAttr = 'data-qtip="' + t('Rounded with the provider billing increments. Unrounded:') + ' ' + num(r.get('our_real_minutes')) + '"';
+                        return num(v);
+                    }
+                }, {
+                    header: t('Provider minutes'), dataIndex: 'provider_minutes', flex: 1.4, renderer: function (v) { return num(v); }
+                }, {
+                    header: t('Difference'), dataIndex: 'diff_pct', flex: 1.1, sortable: false,
+                    renderer: function (v) { return v === null || v === undefined ? '' : (v > 0 ? '+' : '') + Ext.util.Format.number(v, '0.00') + '%'; }
+                }, {
+                    header: t('Our calls'), dataIndex: 'our_calls', flex: 1, sortable: false, renderer: function (v) { return num(v, '0,000'); }
+                }, {
+                    header: t('Provider calls'), dataIndex: 'provider_calls', flex: 1, renderer: function (v) { return num(v, '0,000'); }
+                }, {
+                    header: t('Cap counter min'), dataIndex: 'counter_minutes', flex: 1.2, sortable: false, renderer: function (v) { return num(v); }
+                }, {
+                    header: t('Status'), dataIndex: 'status', flex: 1.2, sortable: false,
+                    renderer: function (v) {
+                        var map = { ok: ['#2e7d32', t('OK')], mismatch: ['#c62828', t('Mismatch')] },
+                            s = map[v] || ['#757575', v || ''];
+                        return '<span style="color:' + s[0] + ';font-weight:bold">' + s[1] + '</span>';
+                    }
+                }, {
+                    header: t('Note'), dataIndex: 'note', flex: 2, hidden: window.isTablet
+                }];
+                me.callParent(arguments);
+            }
+        });
+
+        Ext.define('MBilling.view.trunkCapStatement.Form', {
+            extend: 'Ext.ux.form.Panel',
+            alias: 'widget.trunkcapstatementform',
+            initComponent: function () {
+                var me = this;
+                me.defaults = Ext.apply({}, { labelWidth: 150, anchor: '100%' }, me.defaults);
+                me.items = [{
+                    xtype: 'displayfield', isFormField: false, value: t('Enter the figures from the provider statement. Our minutes are computed from answered CDRs on this trunk, rounded with the provider billing increments.'),
+                    fieldStyle: 'white-space:normal;color:#555'
+                }, {
+                    xtype: 'trunkcombo', name: 'id_trunk', fieldLabel: t('Trunk')
+                }, {
+                    xtype: 'datefield', name: 'period_start', fieldLabel: t('Period start'), format: 'Y-m-d', submitFormat: 'Y-m-d'
+                }, {
+                    xtype: 'datefield', name: 'period_end', fieldLabel: t('Period end (inclusive)'), format: 'Y-m-d', submitFormat: 'Y-m-d'
+                }, {
+                    name: 'timezone', fieldLabel: t('Statement timezone'), value: 'Africa/Lagos'
+                }, {
+                    xtype: 'numberfield', name: 'provider_minutes', fieldLabel: t('Provider minutes'), minValue: 0, decimalPrecision: 2
+                }, {
+                    xtype: 'numberfield', name: 'provider_calls', fieldLabel: t('Provider calls'), minValue: 0, allowDecimals: false,
+                    allowBlank: true, emptyText: t('Optional')
+                }, {
+                    name: 'note', fieldLabel: t('Note'), allowBlank: true, maxLength: 255
+                }];
                 me.callParent(arguments);
             }
         });
