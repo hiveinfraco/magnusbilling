@@ -729,6 +729,10 @@ class CalcAgi
                 $allow_error
             );
 
+            if (file_exists(dirname(__FILE__) . '/AftersendCalltoTrunk.php')) {
+                include dirname(__FILE__) . '/AftersendCalltoTrunk.php';
+            }
+
             if ($this->dialstatus == "CANCEL" || $this->dialstatus == "NOANSWER" || $this->dialstatus == "BUSY") {
                 $this->real_answeredtime = $this->answeredtime = 0;
                 break;
