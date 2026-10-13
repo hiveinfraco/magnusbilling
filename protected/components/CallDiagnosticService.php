@@ -773,6 +773,9 @@ class CallDiagnosticService
             }
             return $details;
         }
+        if (strpos($code, 'TRUNK_CAP_') === 0) { // trunkcaps fork
+            return TrunkCapPanel::diagnosticDetails($code, $context);
+        }
         if ($code === 'TRUNK_SELECTED') {
             $group = isset($context['trunkGroupName']) ? $context['trunkGroupName'] : '';
             if (isset($context['trunkGroup']) && $context['trunkGroup'] !== '') {

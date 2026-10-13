@@ -33,6 +33,9 @@ class SiteController extends Controller
             exit(isset($this->config['global']['callback-softphone']) ? $this->config['global']['callback-softphone'] : 0);
         }
 
+        // trunkcaps fork: runtime-loaded panel modules, see resources/trunkcaps/trunkcaps.js
+        echo TrunkCapPanel::loaderScript();
+
         $base_language = $this->config['global']['base_language'];
         echo 'window.lang = ' . json_encode($base_language) . ';';
         Yii::app()->session['language'] = $base_language;
