@@ -152,7 +152,7 @@ class TrunkCapAgiHookTest extends TestCase
         $calc = $this->call([]);
         $this->assertSame([], $this->dialedTrunks());
         $this->assertSame('BLOCKED', $this->agi->variables['TRUNKCAP_RESULT'] ?? null);
-        $this->assertSame('34', $this->agi->variables['HANGUPCAUSE'] ?? null, 'caller must get a prompt 503, not silence');
+        $this->assertContains('HANGUP 34', $this->agi->commands, 'caller must get a prompt 503, not silence');
         $this->assertContains('TRUNK_CAP_ALL_BLOCKED', $this->agi->eventCodes());
         $this->assertSame('', $calc->dialstatus);
     }
@@ -184,6 +184,21 @@ class TrunkCapAgiHookTest extends TestCase
         $this->call(['ANSWER:5']);
         $this->assertSame([$this->trunkCode($a)], $this->dialedTrunks());
         $this->assertNull($this->usageRow($a));
+    }
+
+    public function testRejectHangsUpWith34AndDiagnosticsDoesNot()
+    {
+        $this->trunk('a', ['max_calls' => 1, 'on_limit' => 'reject']);
+        $this->trunk('b');
+        $this->call(['ANSWER:5']);
+        $this->agi->commands = [];
+        $this->call(['ANSWER:5']);
+        $this->assertSame(['HANGUP 34'], array_values(preg_grep('/^HANGUP/', $this->agi->commands)));
+
+        $this->agi->debugMode = true; // Call Diagnostics dry run must never hang up the channel
+        $this->agi->commands  = [];
+        $this->call(['ANSWER:5']);
+        $this->assertSame([], array_values(preg_grep('/^HANGUP/', $this->agi->commands)));
     }
 }
 
@@ -226,8 +241,11 @@ class TrunkCapFakeAgi extends PDO
         return $getvalue ? $value : ['result' => 1, 'data' => $value];
     }
 
+    public $commands = [];
+
     public function execute($command, $args = '')
     {
+        $this->commands[] = trim($command . ' ' . $args);
     }
 
     public function stream_file($file, $escape = '')

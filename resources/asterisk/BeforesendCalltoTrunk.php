@@ -43,10 +43,13 @@ if (! $trunkCapDecision['allow']) {
     if (! empty($trunkCapRejected) || $key === count($modelTrunks) - 1) {
         // No trunk will be dialed for this call because of caps; visible to the dialplan and in the AGI log.
         $agi->set_variable('TRUNKCAP_RESULT', 'BLOCKED');
-        // Without a dial, MagnusBilling hangs up with HANGUPCAUSE 0, which Asterisk rejects as
-        // invalid: the caller then gets no final SIP response at all. 34 (no circuit/channel
-        // available) makes the caller get a prompt 503, like a congested provider.
-        $agi->set_variable('HANGUPCAUSE', '34');
+        // Without a dial, MagnusBilling later hangs up with HANGUPCAUSE 0, which Asterisk rejects
+        // as invalid, and the caller gets no final SIP response at all. HANGUPCAUSE is read-only
+        // (it mirrors the channel), so hang up here with 34 (no circuit/channel available): the
+        // caller gets a prompt 503. MagnusBilling's remaining steps (CDR) only touch the database.
+        if (! $agi->debugMode) {
+            $agi->execute('HANGUP', '34');
+        }
         $agi->verboseEvent('Trunk', 'TRUNK_CAP_ALL_BLOCKED', 'Call not sent: trunk caps blocked every remaining trunk.', 1, [
             'trunkGroup' => $this->tariffObj[0]['id_trunk_group'],
             'action'     => $trunkCapDecision['action'],
