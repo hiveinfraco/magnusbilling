@@ -159,8 +159,8 @@ Installed location on a server: `/var/www/html/mbilling`.
 
 ### Phase 0: Setup (days 1-3)
 - [x] Fork repo; add `upstream` remote; create branches
-- [ ] Build dev VM on Proxmox; snapshot; install MagnusBilling 8; change default password
-- [ ] Build fake-provider Asterisk for test traffic
+- [x] Build dev VM on Proxmox; snapshot; install MagnusBilling 8; change default password (VM 540 mbilling-dev, 144.217.53.59)
+- [x] Build fake-provider Asterisk for test traffic (SIPp fake providers on the dev VM, see protected/tests/realcall)
 
 ### Phase 1: Discovery (week 1) -- read before changing
 - [x] Read `ARCHITECTURE.md`, `PROJECT.md`, `CONTRIBUTING.md`, relevant `wiki/` pages
@@ -185,11 +185,11 @@ Installed location on a server: `/var/www/html/mbilling`.
 - [x] Call Diagnostics integration
 
 ### Phase 5: Testing (weeks 6-7)
-- [ ] Unit tests for window arithmetic: month boundaries, billing-day resets, rolling windows, configurable timezones
-- [ ] Concurrency test: 100 simultaneous calls on a trunk limited to 10 -> exactly 10 pass
-- [ ] Cap-hit tests: failover to second trunk; clean rejection when all capped; max-duration cutoff
-- [ ] Crash test: kill Asterisk mid-call; reservations cleaned up
-- [ ] Accuracy test: a week of real traffic, compare counters with provider's numbers
+- [x] Unit tests for window arithmetic: month boundaries, billing-day resets, rolling windows, configurable timezones
+- [x] Concurrency test: 100 simultaneous calls on a trunk limited to 10 -> exactly 10 pass (real calls, T1)
+- [x] Cap-hit tests: failover to second trunk; clean rejection when all capped; max-duration cutoff (T2-T4)
+- [x] Crash test: kill Asterisk mid-call; reservations cleaned up (T5)
+- [ ] Accuracy test: a week of real traffic, compare counters with provider's numbers (fake-provider accuracy T6 passes exactly; real-carrier week = Phase 6 pilot)
 
 ### Phase 6: Deploy and maintain (week 8+)
 - [ ] Pilot on one low-risk trunk with generous margins; widen gradually

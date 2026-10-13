@@ -67,6 +67,14 @@ A call is counted entirely in the period it **started** in.
 - If the cap check fails (database unreachable, unexpected error), it is logged in the Asterisk console and syslog as `[TrunkCaps] …`, and the call goes ahead as if caps were not installed. Exception: policies marked `strict` block the trunk.
 - If an AGI process dies mid-call, its reservation is released by the per-minute sweeper (`php cron.php TrunkCapSweep`, installed as `/etc/cron.d/magnusbilling-trunkcaps`) once the call's maximum duration plus 5 minutes has passed. The real duration is taken from the CDR when one exists.
 
+## When every trunk is capped
+
+The caller gets a **503 Service Unavailable** within seconds (hangup cause 34). Upstream carriers and phones treat it as "try elsewhere or later". The AGI log shows `TRUNK_CAP_ALL_BLOCKED`, and every skipped trunk gets a `blocked` row in the Trunk Cap Log.
+
+## A new policy counts from the moment it is created
+
+Counters start at zero when a policy is created or reactivated. Calls made earlier in the same period are **not** counted. For example, if you add a monthly cap on the 15th, the first half of the month isn't in the counter. Until counters are reconciled from CDRs, lower the first period's limit by the minutes already used (see Trunk Cap Reconciliation for the CDR figure).
+
 ## Warnings: e-mail and Telegram
 
 When a fixed-period policy crosses a `warn_pct` threshold, a `warned` event is written to `pkg_trunk_cap_event`. Within a minute, the sweeper sends a digest on every configured channel. Each channel keeps its own delivery marker, so a failure on one channel never re-sends on the other. Warnings that can't be sent within 24 hours are dropped from the queue. Rolling-window policies don't send warnings.

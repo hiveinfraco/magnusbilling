@@ -155,3 +155,27 @@ Schema steps 2 and 3 add: `reserved_calls` on usage and minute rows, `reserve_mo
   - The usage view shows at-limit, paused and outside-window states correctly.
   - The log shows readable block and warning details.
   - Reset, pause and end pause work, and each is audited with the user ID.
+
+## 11. Real-call testing (Phase 5, dev VM, 2026-10-13)
+
+Dev VM: Proxmox VM 540 `mbilling-dev`, Debian 12, MagnusBilling 8 from the upstream installer (package DB 8.0.0.17, Asterisk 20.9.2, PHP 8.2). The fork was deployed with `protected/tests/realcall/deploy-dev.sh`, which patches the upstream files instead of overwriting them, because the package is newer than the GitHub source. The kit is in `protected/tests/realcall/` (SIPp caller, plus SIPp fake providers on 127.0.0.2/127.0.0.3).
+
+| Test | Checks | Result |
+|---|---|---|
+| T0 smoke | 4 | pass |
+| T1 100 simultaneous calls, cap 10 concurrent | 5 | pass: exactly 10 answered, CDR peak overlap 10, 90 blocked |
+| T2 cap-based failover A → B | 3 | pass |
+| T3 all trunks capped | 5 | pass after a fix (below) |
+| T4 cut-off at remaining minutes | 4 | pass: the network ended the call at 120 s, counter 120 s |
+| T5 Asterisk SIGKILL mid-call + sweep | 5 | pass (expiry fast-forwarded) |
+| T6 40 calls vs the fake provider's records, 60/60 billing | 5 | pass: cap counter = provider billed seconds exactly; reconciliation `ok` |
+
+**Product bug found and fixed:** when caps blocked every trunk, MagnusBilling hung up with cause 0. Asterisk rejects that value, so the caller got no final SIP response and waited until its own timeout. The before-hook now hangs up with cause 34, giving a prompt 503. `HANGUPCAUSE` can't be set because it's read-only, so the hook has to hang up itself.
+
+**Limitation found:** a new policy counts from its creation. A mid-period policy therefore misses earlier usage (ADMIN.md). The spec's "reconcile counters against CDR" cron would close this gap and isn't built yet.
+
+**Upstream MagnusBilling issues seen (not trunk caps):**
+- The PJSIP generator drops the port for IP trunks without a username. The port has to go in the host field.
+- The generator writes `qualify` verbatim as `qualify_frequency`, so "no" or "0" makes Asterisk drop the trunk's AOR silently.
+- Calls with no dial at all hang up with the invalid cause 0, which also happens on the upstream paths for no provider credit or all trunks inactive.
+- The download package is ahead of the GitHub `source` branch.
