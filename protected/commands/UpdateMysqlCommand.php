@@ -27,6 +27,7 @@ class UpdateMysqlCommand extends CConsoleCommand
     public function run($args)
     {
         $this->config = LoadConfig::getConfig();
+        TrunkCapSchema::migrate(); // trunkcaps fork: separate version track, see docs/trunkcaps
 
         if (file_exists('/var/spool/cron/root')) {
             $CRONPATH = '/var/spool/cron/root';
