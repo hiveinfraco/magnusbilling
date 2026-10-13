@@ -92,7 +92,7 @@ Changes from the first draft, and why:
 
 **Atomic reserve:** one short transaction per trunk attempt. `SELECT … FROM pkg_trunk_cap_lock WHERE id_trunk=? FOR UPDATE` serializes cap checks for that trunk. Then read usage, check the limits, upsert the counters, insert the reservation, and commit. Any exception → log + fail open, unless the policy is `strict`.
 
-**Open for Phase 3 (not a schema blocker):** how many seconds to reserve per call. If you reserve the full remaining minutes, one call blocks the trunk. If you reserve too little, concurrent calls can overshoot near the boundary. Planned approach: dial limit = remaining − seconds already reserved by others; reserve that full limit only once remaining drops below a threshold.
+**Reservation sizing:** resolved in Phase 3. See §9 and `ADMIN.md`.
 
 ## 6. Files to touch
 
@@ -114,3 +114,21 @@ Changes from the first draft, and why:
 - Rolling periods sum the 1-minute buckets, including the current minute. **ASSUMPTION:** a rolling "month" is 30 days.
 - Time-of-day windows include the start time and exclude the end time. An overnight window (e.g. 22:00–06:00) counts as the weekday it opens on.
 - A call is counted in the period and window where it **starts**. A call that crosses a period boundary is charged entirely to the period it started in.
+
+## 9. Enforcement (implemented in Phase 3)
+
+Schema steps 2 and 3 add: `reserved_calls` on usage and minute rows, `reserve_mode` on policies, `max_seconds` on reservations, `notified_at` on events, the `trunkcaps_alert_email` setting, and `/etc/cron.d/magnusbilling-trunkcaps`.
+
+- **Hook flow:** `BeforesendCalltoTrunk.php` calls `TrunkCapService::reserve()` and returns false to skip a trunk. It may lower `$timeout`, which becomes Dial's `L()` limit. `AftersendCalltoTrunk.php` calls `commit()` after each attempt, failed failover attempts included. Both chain to optional `*.local.php` files for site-specific logic.
+- **Locking:** one transaction per trunk attempt, using READ COMMITTED isolation and `SELECT … FOR UPDATE` on `pkg_trunk_cap_lock`. The lock row is created **outside** the transaction. Creating it inside concurrent transactions deadlocked in testing, and fail-open then let calls through without a cap check. Deadlocks and lock timeouts are retried 3 times before failing open.
+- **Calls limits:** `count_failed_attempts = 1` counts `attempts`, which are charged at reserve time. Otherwise the count is `calls + reserved_calls`, so in-flight calls count against the limit. Count limits after the safety margin are never below 1.
+- **Minutes limits:**
+  - available = margin-adjusted limit − billed − reserved seconds. Below 30 s the policy blocks (**ASSUMPTION**).
+  - Dial limit = min(the call's normal timeout, available), taking the tightest policy.
+  - `adaptive` (default): reserve the expected call length while available ≥ 2× the call's timeout, otherwise reserve the full dial limit. Expected length = the window's average answered call, rounded up to a whole minute; it defaults to 180 s (**ASSUMPTION**) until 10 calls are answered. **Residual risk:** many long calls admitted at the same time while above the threshold can overshoot. Keep a safety margin, or use `full`.
+  - `full`: always reserve the full dial limit. It never overshoots, but near the cap the concurrent calls' maximum durations use up headroom quickly.
+- **Concurrency / CPS:** per trunk. Concurrency = open reservations. CPS = reservations created in the last second, including ones already released.
+- **Billed seconds:** a policy's rounding override takes priority. Otherwise the provider buy-rate init/increment for the matched prefix is used, with the same formula as CalcAgi's buycost.
+- **Blocked calls:** `skip_trunk` fails over to the next trunk. `reject` skips all remaining trunks of this call. When no trunk is dialed because of caps, the channel variable `TRUNKCAP_RESULT=BLOCKED` is set and the AGI logs `TRUNK_CAP_ALL_BLOCKED`. The CDR is the normal failed CDR with an empty dialstatus. **To verify on the dev VM:** the SIP cause the caller receives in that case.
+- **Warnings:** percent of the **provider** cap (not the margin-adjusted limit), billed usage only, fixed windows only. Each threshold fires once per window (`warned_pct`). The AGI only writes the event; `TrunkCapSweep` e-mails a digest. Telegram is not built yet (spec §10 Q6).
+- **Sweeper:** reservations still open after max duration + 300 s are released, using `pkg_cdr.real_sessiontime` when the call was recorded, otherwise counted as an unanswered attempt. Released reservations are purged after 1 day, and minute buckets after 32 days.

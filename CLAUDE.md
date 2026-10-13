@@ -175,10 +175,10 @@ Installed location on a server: `/var/www/html/mbilling`.
 - [x] Migrations for the three tables; models; seed/test data (`TrunkCapSchema`, six tables; see docs/trunkcaps/DISCOVERY.md §5)
 
 ### Phase 3: Enforcement (weeks 3-5)
-- [ ] `TrunkCapService` (window math, check, reserve, commit, release)
-- [ ] Hooks in trunk selection, dial (max duration), and hangup/CDR paths
-- [ ] Reconciliation/cleanup cron
-- [ ] Notification hook for thresholds
+- [x] `TrunkCapService` (window math, check, reserve, commit, release)
+- [x] Hooks in trunk selection, dial (max duration), and hangup/CDR paths
+- [x] Reconciliation/cleanup cron (stale reservations; monthly provider reconciliation report still to do)
+- [x] Notification hook for thresholds (e-mail digest; Telegram pending §10 Q6)
 
 ### Phase 4: UI (weeks 5-6)
 - [ ] Trunk Caps module, live usage view, overrides, audit log view
