@@ -11,8 +11,10 @@ require_once __DIR__ . '/../../components/TrunkCapService.php';
  *   TRUNKCAP_TEST_DSN='mysql:host=127.0.0.1;dbname=mbilling' TRUNKCAP_TEST_USER=... TRUNKCAP_TEST_PASS=... \
  *     phpunit -c protected/tests/phpunit.xml.dist --testsuite integration
  *
- * Only creates and deletes rows for trunks named tctest-*. Use a dev or
- * throwaway database anyway, never production.
+ * Creates and deletes only rows for trunks named tctest-*. However, the sweeper test
+ * runs TrunkCapService::sweep() with a clock a day ahead, and sweep() is global:
+ * it also releases any other open reservations in the database. Use a throwaway
+ * database, never production or a dev system carrying traffic.
  */
 class TrunkCapServiceTest extends TestCase
 {
@@ -131,7 +133,10 @@ class TrunkCapServiceTest extends TestCase
         $this->assertFalse($blocked['allow']);
         $this->assertSame('skip_trunk', $blocked['action']);
         $this->assertSame('max_calls', $blocked['limit']);
-        $this->assertCount(1, $this->events($t, 'blocked'));
+        $blockedEvents = $this->events($t, 'blocked');
+        $this->assertCount(1, $blockedEvents);
+        $this->assertSame(['limit_type' => 'max_calls', 'used' => 3, 'limit' => 3, 'effective' => 3],
+            array_intersect_key(json_decode($blockedEvents[0]['snapshot'], true), array_flip(['limit_type', 'used', 'limit', 'effective'])));
 
         // An unanswered call frees its slot; an answered one keeps it.
         $this->assertTrue($s->commit($r[0], 'NOANSWER', 0));
@@ -161,6 +166,16 @@ class TrunkCapServiceTest extends TestCase
             $this->assertTrue($s->reserve($t, "u$i", 600)['allow']);
         }
         $this->assertFalse($s->reserve($t, 'u5', 600)['allow']);
+    }
+
+    public function testSafetyMarginDoesNotReduceConcurrencyOrCps()
+    {
+        $t = $this->trunk();
+        $this->policy($t, ['max_concurrent' => 2, 'max_cps' => 2, 'safety_margin_pct' => 95]);
+        $s = $this->service();
+        $this->assertTrue($s->reserve($t, 'a', 600)['allow']);
+        $this->assertTrue($s->reserve($t, 'b', 600)['allow']); // floor(2 x 95%) would have been 1
+        $this->assertFalse($s->reserve($t, 'c', 600)['allow']);
     }
 
     public function testCommitIsIdempotent()
@@ -404,6 +419,46 @@ class TrunkCapServiceTest extends TestCase
         $this->assertSame([50, 80], $sent);
         $this->assertCount(2, $this->events($t, 'warned'));
         $this->assertSame('80', $this->usage($p)['warned_pct']);
+    }
+
+    public function testPausedPolicyIsNotEnforcedButStillCounts()
+    {
+        $t = $this->trunk();
+        $p = $this->policy($t, ['max_calls' => 1, 'max_minutes' => 1]);
+        $s = $this->service();
+        $s->setOverride($p, $this->now + 3600, 7);
+
+        $first  = $s->reserve($t, 'a', 600);
+        $second = $s->reserve($t, 'b', 600);
+        $this->assertTrue($first['allow'] && $second['allow']);
+        $this->assertSame(600, $second['timeout'], 'no duration cap while paused');
+        $s->commit($first['reservation'], 'ANSWER', 120);
+        $this->assertSame(['1', '2', '120'], array_values(array_intersect_key($this->usage($p), array_flip(['calls', 'attempts', 'billed_seconds']))));
+
+        $this->now += 3601; // pause over: limits apply again, counting what happened meanwhile
+        $this->assertFalse($s->reserve($t, 'c', 600)['allow']);
+        $override = $this->events($t, 'override');
+        $this->assertSame('7', (string) $override[0]['id_user']);
+    }
+
+    public function testResetKeepsInFlightCallsAndAuditsOldUsage()
+    {
+        $t = $this->trunk();
+        $p = $this->policy($t, ['max_calls' => 10, 'max_minutes' => 100, 'warn_pct' => '10']);
+        $s = $this->service();
+        $s->commit($s->reserve($t, 'done', 600)['reservation'], 'ANSWER', 700);
+        $live = $s->reserve($t, 'live', 600);
+
+        $snapshot = $s->resetWindow($p, 9);
+        $this->assertSame(1, $snapshot['before']['calls']);
+        $this->assertSame(['0', '1', '1', '0', '0'], array_values(array_intersect_key($this->usage($p),
+            array_flip(['calls', 'attempts', 'reserved_calls', 'billed_seconds', 'warned_pct']))));
+
+        $s->commit($live['reservation'], 'ANSWER', 60); // reserved before the reset: no underflow
+        $u = $this->usage($p);
+        $this->assertSame(['1', '0', '0', '60'], [$u['calls'], $u['reserved_calls'], $u['reserved_seconds'], $u['billed_seconds']]);
+        $reset = $this->events($t, 'reset');
+        $this->assertSame('9', (string) $reset[0]['id_user']);
     }
 
     public function testDryRunWritesNothing()

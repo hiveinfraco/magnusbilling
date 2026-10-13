@@ -21,6 +21,7 @@
  * A copy of which is available from http://www.gnu.org/copyleft/lesser.html
  */
 require_once __DIR__ . '/TrunkCapWindow.php';
+require_once __DIR__ . '/TrunkCapDescriber.php';
 
 class TrunkCapService
 {
@@ -269,6 +270,154 @@ class TrunkCapService
         return max(1, (int) floor((int) $limit * (int) $marginPct / 100));
     }
 
+    // ---- panel: live status, reset, override ---------------------------------
+
+    /**
+     * Current usage of every active policy (optionally one trunk), for the
+     * live usage view. Read-only.
+     *
+     * @return array one row per policy
+     */
+    public function status($idTrunk = null)
+    {
+        $now      = $this->now();
+        $ts       = (int) floor($now);
+        $policies = $this->rows(
+            'SELECT p.*, t.trunkcode FROM pkg_trunk_cap_policy p JOIN pkg_trunk t ON t.id = p.id_trunk
+             WHERE p.active = 1' . ($idTrunk ? ' AND p.id_trunk = ' . (int) $idTrunk : '') . ' ORDER BY t.trunkcode, p.id'
+        );
+
+        $trunkStats = [];
+        $rows       = [];
+        foreach ($policies as $p) {
+            $t = (int) $p['id_trunk'];
+            if (! isset($trunkStats[$t])) {
+                $trunkStats[$t] = [
+                    'in_flight' => (int) $this->scalar(
+                        'SELECT COUNT(*) FROM pkg_trunk_cap_reservation WHERE id_trunk = ? AND released_at IS NULL', [$t]
+                    ),
+                ];
+            }
+            $period = TrunkCapWindow::period($p, $ts);
+            $usage  = $this->usage($p, $period);
+            $calls  = self::usedCalls($usage, (int) $p['count_failed_attempts'] === 1);
+
+            $pct = null;
+            if ($p['max_calls'] !== null) {
+                $pct = 100 * $calls / (int) $p['max_calls'];
+            }
+            if ($p['max_minutes'] !== null) {
+                $pct = max((float) $pct, 100 * ($usage['billed_seconds'] + $usage['reserved_seconds']) / ((int) $p['max_minutes'] * 60));
+            }
+            if ($p['max_concurrent'] !== null) {
+                $pct = max((float) $pct, 100 * $trunkStats[$t]['in_flight'] / (int) $p['max_concurrent']);
+            }
+
+            if (self::isPaused($p, $ts)) {
+                $state = 'paused';
+            } elseif (! TrunkCapWindow::appliesAt($p, $ts)) {
+                $state = 'outside_window';
+            } elseif ($pct !== null && $pct >= (int) $p['safety_margin_pct']) {
+                $state = 'blocking';
+            } else {
+                $warn  = array_filter(array_map('intval', explode(',', (string) $p['warn_pct'])));
+                $state = $warn && $pct !== null && $pct >= min($warn) ? 'warning' : 'ok';
+            }
+
+            $rows[] = [
+                'id'                => (int) $p['id'],
+                'id_trunk'          => $t,
+                'trunkcode'         => $p['trunkcode'],
+                'name'              => $p['name'],
+                'summary'           => TrunkCapDescriber::describe($p),
+                'state'             => $state,
+                'window_start'      => self::localTime($period['start'], $p['timezone']),
+                'window_end'        => $period['rolling'] ? null : self::localTime($period['end'], $p['timezone']),
+                'rolling'           => $period['rolling'],
+                'calls'             => $calls,
+                'max_calls'         => $p['max_calls'] === null ? null : (int) $p['max_calls'],
+                'billed_minutes'    => round($usage['billed_seconds'] / 60, 1),
+                'reserved_minutes'  => round($usage['reserved_seconds'] / 60, 1),
+                'max_minutes'       => $p['max_minutes'] === null ? null : (int) $p['max_minutes'],
+                'in_flight'         => $trunkStats[$t]['in_flight'],
+                'max_concurrent'    => $p['max_concurrent'] === null ? null : (int) $p['max_concurrent'],
+                'pct'               => $pct === null ? null : round($pct, 1),
+                'safety_margin_pct' => (int) $p['safety_margin_pct'],
+                'override_until'    => $p['override_until'],
+            ];
+        }
+        return $rows;
+    }
+
+    /**
+     * Zero the current window's counters for a policy. In-flight calls keep
+     * their reservations. Audited as a 'reset' event with the old usage.
+     */
+    public function resetWindow($idPolicy, $idUser = null)
+    {
+        $p = $this->row('SELECT * FROM pkg_trunk_cap_policy WHERE id = ?', [(int) $idPolicy]);
+        if (! $p) {
+            throw new InvalidArgumentException('Unknown policy ' . (int) $idPolicy);
+        }
+        $idTrunk = (int) $p['id_trunk'];
+        $this->ensureLockRow($idTrunk);
+
+        try {
+            $this->db->exec('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+            $this->db->beginTransaction();
+            $this->lockTrunk($idTrunk);
+            $period = TrunkCapWindow::period($p, (int) floor($this->now()));
+            $before = $this->usage($p, $period);
+            $zero   = 'calls = 0, attempts = reserved_calls, billed_seconds = 0';
+            if ($period['rolling']) {
+                $this->exec(
+                    "UPDATE pkg_trunk_cap_minute SET $zero WHERE id_policy = ? AND minute_start >= ? AND minute_start < ?",
+                    [(int) $p['id'], TrunkCapWindow::toDb($period['start']), TrunkCapWindow::toDb($period['end'])]
+                );
+            } else {
+                $this->exec(
+                    "UPDATE pkg_trunk_cap_usage SET $zero, warned_pct = 0 WHERE id_policy = ? AND window_start = ?",
+                    [(int) $p['id'], TrunkCapWindow::toDb($period['start'])]
+                );
+            }
+            $this->db->commit();
+        } catch (Throwable $e) {
+            $this->rollback();
+            throw $e;
+        }
+
+        $snapshot = ['window_start' => TrunkCapWindow::toDb($period['start']), 'before' => $before];
+        $this->logEvent($idTrunk, (int) $p['id'], 'reset', $snapshot, null, $idUser);
+        return $snapshot;
+    }
+
+    /**
+     * Pause a policy until $untilTs (UTC epoch), or end a pause with null.
+     * Audited as an 'override' event.
+     */
+    public function setOverride($idPolicy, $untilTs, $idUser = null)
+    {
+        $p = $this->row('SELECT id, id_trunk, override_until FROM pkg_trunk_cap_policy WHERE id = ?', [(int) $idPolicy]);
+        if (! $p) {
+            throw new InvalidArgumentException('Unknown policy ' . (int) $idPolicy);
+        }
+        $until = $untilTs === null ? null : TrunkCapWindow::toDb($untilTs);
+        $this->exec('UPDATE pkg_trunk_cap_policy SET override_until = ? WHERE id = ?', [$until, (int) $idPolicy]);
+        $this->logEvent((int) $p['id_trunk'], (int) $p['id'], 'override',
+            ['override_until' => $until, 'previous' => $p['override_until']], null, $idUser);
+    }
+
+    private static function isPaused(array $p, $ts)
+    {
+        return ! empty($p['override_until']) && TrunkCapWindow::fromDb($p['override_until']) > $ts;
+    }
+
+    private static function localTime($ts, $timezone)
+    {
+        return (new DateTimeImmutable('@' . (int) $ts))->setTimezone(new DateTimeZone($timezone ?: 'Africa/Lagos'))
+            ->format('Y-m-d H:i T');
+    }
+
     // ---- evaluation ---------------------------------------------------------
 
     private function evaluate($idTrunk, array $policies, $timeout, $now)
@@ -284,6 +433,9 @@ class TrunkCapService
             if (! TrunkCapWindow::appliesAt($p, $ts)) {
                 continue;
             }
+            // A paused policy is not enforced, but its usage is still counted so the
+            // counters keep matching the provider after the pause ends.
+            $paused   = self::isPaused($p, $ts);
             $period   = TrunkCapWindow::period($p, $ts);
             $usage    = $this->usage($p, $period);
             $margin   = (int) $p['safety_margin_pct'];
@@ -317,10 +469,14 @@ class TrunkCapService
                 },
             ];
             foreach ($countChecks as $limit => $used) {
-                if ($p[$limit] === null || $p[$limit] === '') {
+                if ($paused || $p[$limit] === null || $p[$limit] === '') {
                     continue;
                 }
-                $effective = self::effectiveCount($p[$limit], $margin);
+                // The margin covers drift between our period counters and the provider's records.
+                // Concurrency and CPS are measured exactly here, so they use the provider limit as is.
+                $effective = in_array($limit, ['max_concurrent', 'max_cps'], true)
+                    ? (int) $p[$limit]
+                    : self::effectiveCount($p[$limit], $margin);
                 $value     = $used();
                 if ($value + 1 > $effective) {
                     $blocks[] = [$p, $limit, ['used' => $value, 'limit' => (int) $p[$limit], 'effective' => $effective, 'window_start' => $window]];
@@ -328,7 +484,7 @@ class TrunkCapService
             }
 
             $reserve = 0;
-            if ($p['max_minutes'] !== null && $p['max_minutes'] !== '') {
+            if (! $paused && $p['max_minutes'] !== null && $p['max_minutes'] !== '') {
                 $effective = (int) floor((int) $p['max_minutes'] * 60 * $margin / 100);
                 $available = $effective - $usage['billed_seconds'] - $usage['reserved_seconds'];
                 if ($available < self::MIN_CALL_SECONDS) {
@@ -362,6 +518,7 @@ class TrunkCapService
                 }
             }
             list($p, $limit, $snapshot) = $blocks[0];
+            $snapshot = ['limit_type' => $limit] + $snapshot;
             $reason = sprintf('%s reached on policy "%s"', $limit, $p['name']);
             return ['decision' => $this->blockDecision($timeout, $action, $reason, (int) $p['id'], $limit, $snapshot), 'allocations' => []];
         }

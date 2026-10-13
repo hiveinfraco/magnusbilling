@@ -78,6 +78,14 @@ class TrunkCapSchema
      */
     public function down()
     {
+        foreach (array_keys(self::modules()) as $module) {
+            $this->db->createCommand(
+                'DELETE gm FROM pkg_group_module gm JOIN pkg_module m ON m.id = gm.id_module WHERE m.module = :module'
+            )->execute([':module' => $module]);
+            $this->db->createCommand('DELETE FROM pkg_module WHERE module = :module')->execute([':module' => $module]);
+        }
+        $this->say('Removed the Trunk Caps menu entries.');
+
         foreach ([
             'pkg_trunk_cap_event',
             'pkg_trunk_cap_reservation',
@@ -105,6 +113,45 @@ class TrunkCapSchema
             [$this, 'step1CreateTables'],
             [$this, 'step2ReservationAccounting'],
             [$this, 'step3SweepAndAlerts'],
+            [$this, 'step4PanelModules'],
+        ];
+    }
+
+    /** Admin menu entries under Routes, the policy pause column. */
+    private function step4PanelModules()
+    {
+        if (! $this->columnExists('pkg_trunk_cap_policy', 'override_until')) {
+            $this->db->createCommand(
+                "ALTER TABLE `pkg_trunk_cap_policy` ADD `override_until` datetime DEFAULT NULL
+                 COMMENT 'UTC; policy not enforced until then' AFTER `strict`"
+            )->execute();
+        }
+
+        foreach (self::modules() as $module => $m) {
+            $this->db->createCommand(
+                "INSERT INTO pkg_module (text, module, icon_cls, id_module, priority)
+                 SELECT :text, :module, :icon, 10, :priority FROM DUAL
+                 WHERE NOT EXISTS (SELECT 1 FROM pkg_module WHERE module = :existing)"
+            )->execute([':text' => $m[0], ':module' => $module, ':icon' => $m[1], ':priority' => $m[2], ':existing' => $module]);
+
+            $this->db->createCommand(
+                "INSERT INTO pkg_group_module (id_group, id_module, action, show_menu, createShortCut, createQuickStart)
+                 SELECT 1, m.id, :action, 1, 0, 0 FROM pkg_module m
+                 WHERE m.module = :module
+                   AND EXISTS (SELECT 1 FROM pkg_group_user g WHERE g.id = 1)
+                   AND NOT EXISTS (SELECT 1 FROM pkg_group_module gm WHERE gm.id_group = 1 AND gm.id_module = m.id)"
+            )->execute([':action' => $m[3], ':module' => $module]);
+        }
+        $this->say('Added the Trunk Caps menu entries for the administrator group. Users must log in again to see them.');
+    }
+
+    /** module => [menu text, icon, priority under Routes, admin action] */
+    private static function modules()
+    {
+        return [
+            'trunkcappolicy' => ["t('Trunk Caps')", 'x-fa fa-tachometer', 4, 'crud'],
+            'trunkcapusage'  => ["t('Trunk Cap Usage')", 'x-fa fa-bar-chart', 5, 'r'],
+            'trunkcapevent'  => ["t('Trunk Cap Log')", 'x-fa fa-list', 6, 'r'],
         ];
     }
 
