@@ -722,7 +722,8 @@
                 }, {
                     name: 'timezone', fieldLabel: t('Statement timezone'), value: 'Africa/Lagos'
                 }, {
-                    xtype: 'numberfield', name: 'provider_minutes', fieldLabel: t('Provider minutes'), minValue: 0, decimalPrecision: 2
+                    xtype: 'numberfield', name: 'provider_minutes', fieldLabel: t('Provider minutes'), minValue: 0,
+                    allowDecimals: true, decimalPrecision: 2 // MagnusBilling defaults number fields to integers
                 }, {
                     xtype: 'numberfield', name: 'provider_calls', fieldLabel: t('Provider calls'), minValue: 0, allowDecimals: false,
                     allowBlank: true, emptyText: t('Optional')

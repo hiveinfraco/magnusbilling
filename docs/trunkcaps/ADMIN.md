@@ -13,6 +13,7 @@ Under **Routes**, for the administrator group (log in again after upgrading to s
   Both actions are recorded in the Trunk Cap Log with the user who made them.
 - **Trunk Cap Usage:** live view of every active policy's current period: status (OK, Warning, At limit, Paused, Outside window), usage bar, minutes (billed plus reserved for calls in progress), calls, and calls in progress. It refreshes every 30 seconds.
 - **Trunk Cap Log:** read-only audit log of blocked calls, warnings, resets, pauses and swept reservations. Select a row to see the full snapshot.
+- **Trunk Cap Reconciliation:** provider statements and how they compare with our minutes (see below).
 
 Other groups get no access unless you grant it under Settings → Group users. The usage and log screens are read-only for everyone.
 
@@ -66,9 +67,32 @@ A call is counted entirely in the period it **started** in.
 - If the cap check fails (database unreachable, unexpected error), it is logged in the Asterisk console and syslog as `[TrunkCaps] …`, and the call goes ahead as if caps were not installed. Exception: policies marked `strict` block the trunk.
 - If an AGI process dies mid-call, its reservation is released by the per-minute sweeper (`php cron.php TrunkCapSweep`, installed as `/etc/cron.d/magnusbilling-trunkcaps`) once the call's maximum duration plus 5 minutes has passed. The real duration is taken from the CDR when one exists.
 
-## Warnings
+## Warnings: e-mail and Telegram
 
-When a fixed-period policy crosses a `warn_pct` threshold, a `warned` event is written to `pkg_trunk_cap_event`. Within a minute, the sweeper e-mails a digest to the addresses in the **Trunk caps alert e-mail** setting (`trunkcaps_alert_email`), using the admin SMTP account. Warnings that can't be sent within 24 hours are dropped from the queue. Rolling-window policies don't send warnings.
+When a fixed-period policy crosses a `warn_pct` threshold, a `warned` event is written to `pkg_trunk_cap_event`. Within a minute, the sweeper sends a digest on every configured channel. Each channel keeps its own delivery marker, so a failure on one channel never re-sends on the other. Warnings that can't be sent within 24 hours are dropped from the queue. Rolling-window policies don't send warnings.
+
+- **E-mail:** set **Trunk caps alert e-mail** (`trunkcaps_alert_email`, comma-separated). Mail goes through the admin SMTP account (Settings → SMTP).
+- **Telegram:**
+  1. Create a bot with @BotFather and copy its token.
+  2. Add the bot to the group or channel that should receive alerts (as an admin for channels).
+  3. Find the chat ID. Send a message in the chat, then open `https://api.telegram.org/bot<TOKEN>/getUpdates`. Group IDs start with `-100`.
+  4. Under Settings → Configuration, set **Trunk caps Telegram bot token** and **Trunk caps Telegram chat ID**.
+
+  Leave the token empty to turn Telegram off. Errors are logged without the token.
+
+A warning threshold of 100 never fires on a policy with a safety margin below 100, because the policy blocks first. Use, for example, `80,90,95`.
+
+## Monthly reconciliation against provider statements
+
+Under **Routes → Trunk Cap Reconciliation**, enter each provider statement: trunk, period (inclusive dates), the statement's timezone, minutes, and optionally calls. Each row shows:
+
+- **Our minutes:** answered CDR time on that trunk in the period, rounded per call with the provider's billing increments (buy-rate initial block and increment for the call's prefix, or the policy's rounding override). Hover over the value for the unrounded figure.
+- **Cap counter min:** the trunk's calendar-month minutes counter, shown only when the statement covers exactly that month.
+- **Difference** and **Status:** `OK` or `Mismatch` against **Trunk caps reconciliation tolerance %** (`trunkcaps_reconcile_tolerance_pct`, default 2).
+
+On the 2nd of every month at 07:00 (server time), `php cron.php TrunkCapReconcile send` sends the previous month's report by e-mail and Telegram. Trunks with a minutes policy but no statement are listed as "No statement", so a missing statement is visible too. Run `php cron.php TrunkCapReconcile 2026-09` to print any month without sending.
+
+CDR times are in the server's PHP timezone (set by the installer from the system timezone). Statement periods are converted from the statement's timezone, so a Lagos-time statement on a UTC server lines up correctly.
 
 ## Audit log
 
@@ -89,4 +113,5 @@ php cron.php TrunkCapMigrate                 # schema version
 php cron.php TrunkCapMigrate up              # also run automatically by UpdateMysql
 php cron.php TrunkCapMigrate down confirm    # remove trunk caps tables, data and cron file
 php cron.php TrunkCapSweep                   # what the cron runs every minute
+php cron.php TrunkCapReconcile [send] [YYYY-MM]   # monthly report (cron: 2nd of the month, send)
 ```
