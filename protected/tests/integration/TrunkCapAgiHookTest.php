@@ -152,6 +152,7 @@ class TrunkCapAgiHookTest extends TestCase
         $calc = $this->call([]);
         $this->assertSame([], $this->dialedTrunks());
         $this->assertSame('BLOCKED', $this->agi->variables['TRUNKCAP_RESULT'] ?? null);
+        $this->assertSame('34', $this->agi->variables['HANGUPCAUSE'] ?? null, 'caller must get a prompt 503, not silence');
         $this->assertContains('TRUNK_CAP_ALL_BLOCKED', $this->agi->eventCodes());
         $this->assertSame('', $calc->dialstatus);
     }

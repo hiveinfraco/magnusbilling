@@ -49,12 +49,13 @@ trap stop_providers EXIT
 
 CALLER_PORT=5070
 # calls NAME COUNT RATE_PER_S HOLD_MS [SCENARIO] [MAX_CONCURRENT] - runs and waits
-calls() {
+calls() { # extra SIPp options after the 6th argument are passed through
     local name=$1 count=$2 rate=$3 hold=$4 scen=${5:-uac_auth.xml} limit=${6:-$2}
+    shift $(( $# < 6 ? $# : 6 ))
     CALLER_PORT=$((CALLER_PORT + 1))
     sipp 127.0.0.1:5060 -sf "$SCEN/$scen" -s "${TCRC_PREFIX}$(printf '%07d' $RANDOM)" \
         -set user "$TCRC_SIP_USER" -au "$TCRC_SIP_USER" -ap "$TCRC_SIP_PASS" -i 127.0.0.1 -p "$CALLER_PORT" \
-        -m "$count" -r "$rate" -l "$limit" -d "$hold" -timeout 1200 -recv_timeout 150000 -bg -nostdin \
+        -m "$count" -r "$rate" -l "$limit" -d "$hold" -timeout 1200 -recv_timeout 150000 -bg -nostdin "$@" \
         -trace_logs -log_file "$OUT/$name.log" -trace_err -error_file "$OUT/$name-err.log" >"$OUT/$name.out" 2>&1
     local pid; pid=$(grep -o 'PID=\[[0-9]*\]' "$OUT/$name.out" | tr -dc 0-9)
     while kill -0 "$pid" 2>/dev/null; do sleep 1; done
@@ -114,6 +115,8 @@ T1() {
 T2() {
     say "T2 failover: tcrc-a capped at 5 calls/day, 8 calls -> 5 on tcrc-a, 3 on tcrc-b"
     reset_caps; group AB; policy "$TCRC_TRUNK_A" "max_calls = 5, period_type = 'day'"
+    # tcrc-b needs a policy so its calls are counted (a policy counts from its creation); T3 lowers it.
+    policy "$TCRC_TRUNK_B" "max_calls = 1000, period_type = 'day'"
     local t; t=$(php_now)
     calls t2 8 1 2000 uac_auth.xml 1
     check "answered" "$(answered t2)" 8
@@ -123,16 +126,16 @@ T2() {
 
 T3() {
     say "T3 all capped: both trunks at their cap -> call rejected, cause visible"
-    # continues from T2's counters: tcrc-a has 5/5; cap tcrc-b at 3 (it has 3)
-    policy "$TCRC_TRUNK_B" "max_calls = 3, period_type = 'day', on_limit = 'skip_trunk'"
+    # continues from T2's counters: tcrc-a has 5/5, tcrc-b has counted 3; lower tcrc-b's cap to 3
+    sql "UPDATE pkg_trunk_cap_policy SET max_calls = 3 WHERE id_trunk = $TCRC_TRUNK_B AND name = 'tcrc'"
     local t; t=$(php_now)
-    calls t3 1 1 2000
+    calls t3 1 1 2000 uac_auth.xml 1 -trace_msg -message_file "$OUT/t3-msg.log"
     check "answered" "$(answered t3)" 0
     check "rejected (SIP final error)" "$(count_lines REJECTED "$OUT/t3.log")" 1
     check "no new CDR on either trunk" "$(( $(cdr_count "$TCRC_TRUNK_A" "$t") + $(cdr_count "$TCRC_TRUNK_B" "$t") ))" 0
     check "blocked events for that call (one per trunk)" "$(sql "SELECT COUNT(DISTINCT id_trunk) FROM pkg_trunk_cap_event WHERE event = 'blocked'
         AND uniqueid = (SELECT uniqueid FROM pkg_trunk_cap_event WHERE event = 'blocked' ORDER BY id DESC LIMIT 1)")" 2
-    say "  info  caller saw: $(grep '^REJECTED' "$OUT/t3.log" | head -1 | cut -c1-120)"
+    check "caller got a final 503 promptly (not silence)" "$(grep -c 'SIP/2.0 503' "$OUT/t3-msg.log" 2>/dev/null || true)" 1
 }
 
 T4() {
@@ -170,6 +173,10 @@ T5() {
 T6() {
     say "T6 accuracy: 40 calls of mixed length vs the fake provider's own records (60/60 billing)"
     reset_caps; group A; policy "$TCRC_TRUNK_A" "max_minutes = 100000, period_type = 'month'"
+    # The statement covers today; drop earlier test calls on the tcrc-* trunks (test-only data)
+    # so today's CDRs are exactly the T6 calls the fake provider is about to log.
+    sql "DELETE FROM pkg_cdr WHERE id_trunk IN ($TCRC_TRUNK_A, $TCRC_TRUNK_B);
+         DELETE FROM pkg_cdr_failed WHERE id_trunk IN ($TCRC_TRUNK_A, $TCRC_TRUNK_B);"
     : >"$OUT/provider-a.log.t6mark"; local before; before=$(wc -l <"$OUT/provider-a.log")
     local t; t=$(php_now)
     for hold in 7000 23000 41000 59000 61000 77000 89000 119000; do
