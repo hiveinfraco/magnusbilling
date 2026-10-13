@@ -54,7 +54,7 @@ calls() {
     CALLER_PORT=$((CALLER_PORT + 1))
     sipp 127.0.0.1:5060 -sf "$SCEN/$scen" -s "${TCRC_PREFIX}$(printf '%07d' $RANDOM)" \
         -set user "$TCRC_SIP_USER" -au "$TCRC_SIP_USER" -ap "$TCRC_SIP_PASS" -i 127.0.0.1 -p "$CALLER_PORT" \
-        -m "$count" -r "$rate" -l "$limit" -d "$hold" -timeout 1200 -bg -nostdin \
+        -m "$count" -r "$rate" -l "$limit" -d "$hold" -timeout 1200 -recv_timeout 150000 -bg -nostdin \
         -trace_logs -log_file "$OUT/$name.log" -trace_err -error_file "$OUT/$name-err.log" >"$OUT/$name.out" 2>&1
     local pid; pid=$(grep -o 'PID=\[[0-9]*\]' "$OUT/$name.out" | tr -dc 0-9)
     while kill -0 "$pid" 2>/dev/null; do sleep 1; done

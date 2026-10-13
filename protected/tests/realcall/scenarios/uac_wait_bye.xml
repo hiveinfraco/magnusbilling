@@ -76,6 +76,9 @@
     ]]>
   </send>
 
+  <!-- Under load Asterisk may answer a retransmitted first INVITE late: ignore that stray challenge. -->
+  <recv response="401" optional="true"/>
+  <recv response="407" optional="true"/>
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
   <recv response="183" optional="true"/>

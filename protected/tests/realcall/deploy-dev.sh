@@ -10,7 +10,8 @@
 #   2. the fork's small edits to upstream files are applied as a patch to the
 #      installed (possibly newer) versions; the deploy stops if it does not
 #      apply cleanly, and is skipped if it is already applied.
-# Then: ownership like install.sh, trunk caps migrations, SIPp for the tests.
+# Then: ownership and modes exactly like install.sh (a blanket chown breaks the
+# panel: Apache must own protected/runtime), trunk caps migrations, SIPp.
 # NEVER point this at production.
 
 set -euo pipefail
@@ -43,8 +44,22 @@ else
     echo "core patch: does NOT apply to the installed files; nothing patched" >&2
     exit 1
 fi
-chown -R asterisk:asterisk /var/www/html/mbilling
-chmod +x resources/asterisk/mbilling.php
+# Same ownership and modes as install.sh: root-owned tree, web-writable dirs for
+# Apache, resources/asterisk for the AGI (Asterisk) user only.
+APACHE_USER=$(. /etc/apache2/envvars 2>/dev/null; echo "${APACHE_RUN_USER:-www-data}")
+M=/var/www/html/mbilling
+chown -R root:root $M
+find $M -type d -exec chmod 755 {} \;
+find $M -type f -exec chmod 644 {} \;
+for d in protected/runtime assets tmp resources/reports resources/images; do
+    [ -d "$M/$d" ] || continue
+    chown -R "$APACHE_USER:$APACHE_USER" "$M/$d"
+    find "$M/$d" -type d -exec chmod 750 {} \;
+    find "$M/$d" -type f -exec chmod 640 {} \;
+done
+chown -R asterisk:asterisk $M/resources/asterisk
+chmod +x $M/resources/asterisk/mbilling.php $M/protected/commands/*.sh
+chmod 500 $M/resources/asterisk $M/resources/asterisk/mbilling.php
 php cron.php UpdateMysql 2>&1 | grep -E 'TrunkCaps|version|rror' || true
 php cron.php TrunkCapMigrate
 command -v sipp >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q sip-tester >/dev/null
