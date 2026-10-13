@@ -5,7 +5,7 @@
 #   bash protected/tests/realcall/run.sh [T1 T2 ...]   # all tests by default
 #
 # Real calls go: SIPp caller -> Asterisk/MagnusBilling (AGI, trunk caps)
-# -> SIPp fake providers on 127.0.0.1:5091 (tcrc-a) and :5092 (tcrc-b).
+# -> SIPp fake providers on 127.0.0.2:5091 (tcrc-a) and 127.0.0.3:5092 (tcrc-b).
 # Every check reads the database (CDRs, cap counters, reservations, events).
 # Only tcrc-* records are touched. Logs: /root/tcrc-results/<timestamp>/.
 
@@ -31,13 +31,18 @@ check_range() { # check_range "description" actual min max
 }
 
 start_providers() {
-    for spec in "a 5091" "b 5092"; do
+    for spec in "a 127.0.0.2 5091" "b 127.0.0.3 5092"; do
         set -- $spec
-        sipp -sf "$SCEN/uas_provider.xml" -i 127.0.0.1 -p "$2" -bg -nostdin -trace_logs -log_file "$OUT/provider-$1.log" \
+        sipp -sf "$SCEN/uas_provider.xml" -i "$2" -p "$3" -aa -bg -nostdin -trace_logs -log_file "$OUT/provider-$1.log" \
             -trace_err -error_file "$OUT/provider-$1-err.log" >"$OUT/provider-$1.out" 2>&1
         PROVIDER_PIDS+=("$(grep -o 'PID=\[[0-9]*\]' "$OUT/provider-$1.out" | tr -dc 0-9)")
     done
-    sleep 1
+    # Asterisk qualifies the trunks (OPTIONS, answered by -aa); wait until both are reachable.
+    asterisk -rx "pjsip qualify tcrc-a" >/dev/null; asterisk -rx "pjsip qualify tcrc-b" >/dev/null
+    for _ in $(seq 1 30); do
+        [ "$(asterisk -rx 'pjsip show contacts' | grep -cE 'tcrc-[ab]/.*Avail')" -eq 2 ] && break; sleep 1
+    done
+    say "trunk contacts: $(asterisk -rx 'pjsip show contacts' | grep -E 'tcrc-[ab]/' | awk '{print $2, $4}' | tr '\n' ' ')"
 }
 stop_providers() { for p in "${PROVIDER_PIDS[@]}"; do kill "$p" 2>/dev/null; done; }
 trap stop_providers EXIT
@@ -48,14 +53,15 @@ calls() {
     local name=$1 count=$2 rate=$3 hold=$4 scen=${5:-uac_auth.xml} limit=${6:-$2}
     CALLER_PORT=$((CALLER_PORT + 1))
     sipp 127.0.0.1:5060 -sf "$SCEN/$scen" -s "${TCRC_PREFIX}$(printf '%07d' $RANDOM)" \
-        -set user "$TCRC_SIP_USER" -set pass "$TCRC_SIP_PASS" -i 127.0.0.1 -p "$CALLER_PORT" \
+        -set user "$TCRC_SIP_USER" -au "$TCRC_SIP_USER" -ap "$TCRC_SIP_PASS" -i 127.0.0.1 -p "$CALLER_PORT" \
         -m "$count" -r "$rate" -l "$limit" -d "$hold" -timeout 1200 -bg -nostdin \
         -trace_logs -log_file "$OUT/$name.log" -trace_err -error_file "$OUT/$name-err.log" >"$OUT/$name.out" 2>&1
     local pid; pid=$(grep -o 'PID=\[[0-9]*\]' "$OUT/$name.out" | tr -dc 0-9)
     while kill -0 "$pid" 2>/dev/null; do sleep 1; done
     sleep 3 # let the AGI finish writing CDRs and commits
 }
-answered() { grep -c '^ANSWERED' "$OUT/$1.log" 2>/dev/null || echo 0; }
+count_lines() { awk -v p="$1" 'index($0, p) == 1 { n++ } END { print n + 0 }' "$2" 2>/dev/null || echo 0; }
+answered() { count_lines ANSWERED "$OUT/$1.log"; }
 
 reset_caps() { # remove test policies (cascades usage/minute rows), reservations, events and old test CDRs
     sql "DELETE FROM pkg_trunk_cap_policy WHERE id_trunk IN ($TCRC_TRUNK_A, $TCRC_TRUNK_B);
@@ -122,7 +128,7 @@ T3() {
     local t; t=$(php_now)
     calls t3 1 1 2000
     check "answered" "$(answered t3)" 0
-    check "rejected (SIP final error)" "$(grep -c '^REJECTED' "$OUT/t3.log" 2>/dev/null || echo 0)" 1
+    check "rejected (SIP final error)" "$(count_lines REJECTED "$OUT/t3.log")" 1
     check "no new CDR on either trunk" "$(( $(cdr_count "$TCRC_TRUNK_A" "$t") + $(cdr_count "$TCRC_TRUNK_B" "$t") ))" 0
     check "blocked events for that call (one per trunk)" "$(sql "SELECT COUNT(DISTINCT id_trunk) FROM pkg_trunk_cap_event WHERE event = 'blocked'
         AND uniqueid = (SELECT uniqueid FROM pkg_trunk_cap_event WHERE event = 'blocked' ORDER BY id DESC LIMIT 1)")" 2
@@ -134,7 +140,7 @@ T4() {
     reset_caps; group A; policy "$TCRC_TRUNK_A" "max_minutes = 2, period_type = 'month', reserve_mode = 'full'"
     local t; t=$(php_now)
     calls t4 1 1 0 uac_wait_bye.xml
-    check "hung up by the network" "$(grep -c '^HUNG_UP_BY_NETWORK' "$OUT/t4.log" 2>/dev/null || echo 0)" 1
+    check "hung up by the network" "$(count_lines HUNG_UP_BY_NETWORK "$OUT/t4.log")" 1
     check_range "CDR real duration (s)" "$(sql "SELECT COALESCE(MAX(real_sessiontime), 0) FROM pkg_cdr WHERE id_trunk = $TCRC_TRUNK_A AND starttime >= '$t'")" 115 121
     check "counter billed seconds (60/60 rounding)" "$(sql "SELECT billed_seconds FROM pkg_trunk_cap_usage u JOIN pkg_trunk_cap_policy p ON p.id = u.id_policy WHERE p.id_trunk = $TCRC_TRUNK_A")" 120
     calls t4b 1 1 2000
@@ -145,7 +151,7 @@ T5() {
     say "T5 crash: 3 calls up, Asterisk killed -> reservations left open, sweeper releases them"
     reset_caps; group A; policy "$TCRC_TRUNK_A" "max_concurrent = 5"
     CALLER_PORT=$((CALLER_PORT + 1))
-    sipp 127.0.0.1:5060 -sf "$SCEN/uac_auth.xml" -s "${TCRC_PREFIX}5550005" -set user "$TCRC_SIP_USER" -set pass "$TCRC_SIP_PASS" \
+    sipp 127.0.0.1:5060 -sf "$SCEN/uac_auth.xml" -s "${TCRC_PREFIX}5550005" -set user "$TCRC_SIP_USER" -au "$TCRC_SIP_USER" -ap "$TCRC_SIP_PASS" \
         -i 127.0.0.1 -p "$CALLER_PORT" -m 3 -r 3 -l 3 -d 300000 -bg -nostdin -trace_logs -log_file "$OUT/t5.log" >"$OUT/t5.out" 2>&1
     local pid; pid=$(grep -o 'PID=\[[0-9]*\]' "$OUT/t5.out" | tr -dc 0-9)
     sleep 15

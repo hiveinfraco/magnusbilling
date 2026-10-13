@@ -8,11 +8,11 @@ SIPp caller (tcrc-sip, digest auth)
    ▼
 Asterisk 20 / PJSIP ──► AGI mbilling.php ──► CalcAgi::sendCall
    │                         └─ Before/AftersendCalltoTrunk.php (trunk caps)
-   ├──► tcrc-a  127.0.0.1:5091  SIPp fake provider A
-   └──► tcrc-b  127.0.0.1:5092  SIPp fake provider B
+   ├──► tcrc-a  127.0.0.2:5091  SIPp fake provider A
+   └──► tcrc-b  127.0.0.3:5092  SIPp fake provider B
 ```
 
-The fake providers answer every call and log each call's answer and hangup time. These logs are the "provider statement" for the accuracy test. Everything runs on the dev VM, so no second VM or public SIP traffic is needed.
+The fake providers listen on their own loopback addresses: if a trunk's host were 127.0.0.1, PJSIP would identify the caller as that trunk by IP and skip authentication. They answer every call and log each call's answer and hangup time. These logs are the "provider statement" for the accuracy test. Everything runs on the dev VM, so no second VM or public SIP traffic is needed.
 
 ## Steps
 

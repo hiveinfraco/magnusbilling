@@ -7,6 +7,10 @@
   as failed calls. Usage: see ../run.sh.
 -->
 <scenario name="tcrc caller waits for BYE">
+  <!-- user: sipp -set user ...; digest credentials: sipp -au ... -ap ...
+       (SIPp does not expand variables inside [authentication ...]) -->
+  <Global variables="user"/>
+
   <send retrans="500">
     <![CDATA[
       INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
@@ -57,7 +61,7 @@
       Call-ID: [call_id]
       CSeq: 2 INVITE
       Contact: <sip:[$user]@[local_ip]:[local_port]>
-      [authentication username=[$user] password=[$pass]]
+      [authentication]
       Max-Forwards: 70
       Content-Type: application/sdp
       Content-Length: [len]

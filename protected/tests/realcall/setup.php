@@ -6,8 +6,8 @@
  *
  *   php protected/tests/realcall/setup.php          (run as root on the dev VM)
  *
- * Creates: provider tcrc-provider; trunks tcrc-a (127.0.0.1:5091) and
- * tcrc-b (127.0.0.1:5092), each answered by a SIPp fake provider; trunk
+ * Creates: provider tcrc-provider; trunks tcrc-a (127.0.0.2:5091) and
+ * tcrc-b (127.0.0.3:5092), each answered by a SIPp fake provider; trunk
  * group tcrc-group (order); plan tcrc-plan; test prefix 9997 rated to that
  * group; provider buy rate 60/60; customer tcrc with a SIP account. Secrets
  * are random and written to /root/tcrc.env (mode 600), never printed.
@@ -51,13 +51,22 @@ if (! idOf('pkg_provider', 'provider_name', 'tcrc-provider')) {
 }
 $provider = idOf('pkg_provider', 'provider_name', 'tcrc-provider');
 
-foreach (['tcrc-a' => 5091, 'tcrc-b' => 5092] as $code => $port) {
+// Each fake provider gets its own loopback address: if a trunk's host were 127.0.0.1,
+// PJSIP would identify the SIPp caller (also 127.0.0.1) as that trunk and skip auth.
+foreach (['tcrc-a' => ['127.0.0.2', 5091], 'tcrc-b' => ['127.0.0.3', 5092]] as $code => $hp) {
     if (! idOf('pkg_trunk', 'trunkcode', $code)) {
         run("INSERT INTO pkg_trunk (id_provider, trunkcode, host, fromdomain, providertech, providerip, user, secret, allow,
                 link_sms, sms_res, language, insecure, qualify, port, status, context)
-             VALUES (:p, :c, '127.0.0.1', '127.0.0.1', 'pjsip', '127.0.0.1', '', '', 'ulaw,alaw', '', '', 'en', 'port,invite', 'no', :port, 1, 'billing')",
-            [':p' => $provider, ':c' => $code, ':port' => (string) $port]);
+             VALUES (:p, :c, :h, :h, 'pjsip', :h, '', '', 'ulaw,alaw', '', '', 'en', 'port,invite', 'yes', :port, 1, 'billing')",
+            [':p' => $provider, ':c' => $code, ':h' => $hp[0], ':port' => (string) $hp[1]]);
     }
+    // MagnusBilling only writes the port into the PJSIP contact for trunks with a username;
+    // for IP trunks the port has to be part of the host (the identify match strips it).
+    // qualify 'yes' like the panel default (qualify_frequency = 60). Other non-numeric values
+    // ("no") or '0' make MagnusBilling write an invalid qualify_frequency and Asterisk then
+    // drops the trunk's AOR without a visible error. The fake providers answer OPTIONS (-aa).
+    run("UPDATE pkg_trunk SET host = :hp, fromdomain = :h, providerip = :h, port = :port, qualify = 'yes' WHERE trunkcode = :c",
+        [':hp' => $hp[0] . ':' . $hp[1], ':h' => $hp[0], ':port' => (string) $hp[1], ':c' => $code]);
 }
 $trunkA = idOf('pkg_trunk', 'trunkcode', 'tcrc-a');
 $trunkB = idOf('pkg_trunk', 'trunkcode', 'tcrc-b');
