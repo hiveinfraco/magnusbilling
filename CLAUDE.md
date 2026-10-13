@@ -181,8 +181,8 @@ Installed location on a server: `/var/www/html/mbilling`.
 - [x] Notification hook for thresholds (e-mail digest; Telegram pending §10 Q6)
 
 ### Phase 4: UI (weeks 5-6)
-- [ ] Trunk Caps module, live usage view, overrides, audit log view
-- [ ] Call Diagnostics integration
+- [x] Trunk Caps module, live usage view, overrides, audit log view (runtime-loaded JS, no Sencha build; see DISCOVERY §10)
+- [x] Call Diagnostics integration
 
 ### Phase 5: Testing (weeks 6-7)
 - [ ] Unit tests for window arithmetic: month boundaries, billing-day resets, rolling windows, configurable timezones

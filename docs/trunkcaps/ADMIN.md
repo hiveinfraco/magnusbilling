@@ -2,7 +2,23 @@
 
 Trunk caps stop MagnusBilling from sending more traffic to a trunk than its upstream provider allows. Each trunk can have one or more **cap policies**. Before every call attempt on a trunk, all of its active policies are checked. If one is at its limit, the trunk is skipped and the call fails over to the next trunk in the Trunk Group, or it is rejected.
 
-> Status: the enforcement engine is in place. The panel screens (Trunk Caps module, live usage, overrides) come in the next milestone. Until then, manage policies directly in `pkg_trunk_cap_policy`.
+## Panel screens
+
+Under **Routes**, for the administrator group (log in again after upgrading to see them):
+
+- **Trunk Caps:** create and edit policies. The **Summary** box at the top of the form describes the policy in plain language as you type. Toolbar actions on the selected policy:
+  - **Reset counters** zeroes the current period's calls and minutes. Calls in progress keep their reservation.
+  - **Pause** (1 h / 4 h / 24 h / End pause) stops enforcing the policy for a while. Usage is still counted during a pause, so the counters keep matching the provider.
+  
+  Both actions are recorded in the Trunk Cap Log with the user who made them.
+- **Trunk Cap Usage:** live view of every active policy's current period: status (OK, Warning, At limit, Paused, Outside window), usage bar, minutes (billed plus reserved for calls in progress), calls, and calls in progress. It refreshes every 30 seconds.
+- **Trunk Cap Log:** read-only audit log of blocked calls, warnings, resets, pauses and swept reservations. Select a row to see the full snapshot.
+
+Other groups get no access unless you grant it under Settings → Group users. The usage and log screens are read-only for everyone.
+
+### How the screens are loaded (for maintainers)
+
+MagnusBilling ships a precompiled Ext JS bundle per theme and a build-generated `index.html`. The Trunk Caps screens are therefore **not** compiled into that bundle. They live in `resources/trunkcaps/trunkcaps.js`, which `index.php` (`SiteController::actionIndex` → `TrunkCapPanel::loaderScript()`) adds to the page. They work with every theme and need no Sencha Cmd build. Deploying is just copying the files. Running upstream's `protected/commands/update.sh` overwrites the fork, so deploy from the fork instead (see the spec, Phase 6).
 
 ## What is enforced
 
@@ -23,7 +39,7 @@ Caps apply to calls routed through a **Trunk Group**. That covers normal outboun
 | `max_minutes` | Billed minutes per period, using the provider's rounding |
 | `max_concurrent` | Simultaneous calls on the trunk |
 | `max_cps` | New calls per second on the trunk |
-| `safety_margin_pct` | Enforce at this percent of each limit (e.g. 95). Count limits never drop below 1. |
+| `safety_margin_pct` | Enforce at this percent of the period limits (calls, calls per hour, minutes), e.g. 95, to absorb differences between our counters and the provider's records. Not applied to concurrent calls or calls per second, which are measured exactly. Count limits never drop below 1. |
 | `warn_pct` | Warning thresholds as a percent of the provider cap, e.g. `80,90` |
 | `on_limit` | `skip_trunk` fails over to the next trunk. `reject` fails the call without trying other trunks. |
 | `reserve_mode` | `adaptive` (default) or `full`. See below. |
@@ -43,6 +59,8 @@ While a call is in progress, part of the remaining minutes is reserved for it:
 
 A call is counted entirely in the period it **started** in.
 
+**Known limitation: direct media.** When both the SIP account and the trunk have `directmedia = yes`, MagnusBilling removes the Dial time limit (`L()`), so the call can't be cut off when the minutes run out (`Magnus::run_dial`). Calls are still counted correctly and new calls are still blocked, but a call already in progress can run past the cap. Avoid direct media on capped trunks, or keep a larger safety margin.
+
 ## If something goes wrong
 
 - If the cap check fails (database unreachable, unexpected error), it is logged in the Asterisk console and syslog as `[TrunkCaps] …`, and the call goes ahead as if caps were not installed. Exception: policies marked `strict` block the trunk.
@@ -54,11 +72,11 @@ When a fixed-period policy crosses a `warn_pct` threshold, a `warned` event is w
 
 ## Audit log
 
-`pkg_trunk_cap_event` records `blocked` (with the limit and usage at that moment), `warned`, `swept` and, once the panel screens exist, `reset` and `override`.
+`pkg_trunk_cap_event` records `blocked` (with the limit and usage at that moment), `warned`, `swept`, `reset` and `override`. Resets and pauses also store the panel user's ID. View it under Routes → Trunk Cap Log.
 
 ## Call diagnostics and logs
 
-AGI log events: `TRUNK_CAP_BLOCKED` (trunk skipped), `TRUNK_CAP_LIMITED` (call duration shortened), and `TRUNK_CAP_ALL_BLOCKED` (no trunk dialed because of caps). In the last case the channel variable `TRUNKCAP_RESULT` is set to `BLOCKED`. Call Diagnostics runs the check without reserving anything.
+AGI log events: `TRUNK_CAP_BLOCKED` (trunk skipped), `TRUNK_CAP_LIMITED` (call duration shortened), and `TRUNK_CAP_ALL_BLOCKED` (no trunk dialed because of caps). In the last case the channel variable `TRUNKCAP_RESULT` is set to `BLOCKED`. Call Diagnostics runs the check without reserving anything, and shows these events with the trunk, the limit reached, the policy ID and the action.
 
 ## Site-specific hooks
 

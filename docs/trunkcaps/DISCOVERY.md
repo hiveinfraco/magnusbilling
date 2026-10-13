@@ -121,7 +121,7 @@ Schema steps 2 and 3 add: `reserved_calls` on usage and minute rows, `reserve_mo
 
 - **Hook flow:** `BeforesendCalltoTrunk.php` calls `TrunkCapService::reserve()` and returns false to skip a trunk. It may lower `$timeout`, which becomes Dial's `L()` limit. `AftersendCalltoTrunk.php` calls `commit()` after each attempt, failed failover attempts included. Both chain to optional `*.local.php` files for site-specific logic.
 - **Locking:** one transaction per trunk attempt, using READ COMMITTED isolation and `SELECT … FOR UPDATE` on `pkg_trunk_cap_lock`. The lock row is created **outside** the transaction. Creating it inside concurrent transactions deadlocked in testing, and fail-open then let calls through without a cap check. Deadlocks and lock timeouts are retried 3 times before failing open.
-- **Calls limits:** `count_failed_attempts = 1` counts `attempts`, which are charged at reserve time. Otherwise the count is `calls + reserved_calls`, so in-flight calls count against the limit. Count limits after the safety margin are never below 1.
+- **Calls limits:** `count_failed_attempts = 1` counts `attempts`, which are charged at reserve time. Otherwise the count is `calls + reserved_calls`, so in-flight calls count against the limit. Count limits after the safety margin are never below 1. The margin is **not** applied to `max_concurrent` / `max_cps`. Those are measured exactly here, and flooring a small limit (2 × 95% → 1) halved capacity in panel testing.
 - **Minutes limits:**
   - available = margin-adjusted limit − billed − reserved seconds. Below 30 s the policy blocks (**ASSUMPTION**).
   - Dial limit = min(the call's normal timeout, available), taking the tightest policy.
@@ -132,3 +132,26 @@ Schema steps 2 and 3 add: `reserved_calls` on usage and minute rows, `reserve_mo
 - **Blocked calls:** `skip_trunk` fails over to the next trunk. `reject` skips all remaining trunks of this call. When no trunk is dialed because of caps, the channel variable `TRUNKCAP_RESULT=BLOCKED` is set and the AGI logs `TRUNK_CAP_ALL_BLOCKED`. The CDR is the normal failed CDR with an empty dialstatus. **To verify on the dev VM:** the SIP cause the caller receives in that case.
 - **Warnings:** percent of the **provider** cap (not the margin-adjusted limit), billed usage only, fixed windows only. Each threshold fires once per window (`warned_pct`). The AGI only writes the event; `TrunkCapSweep` e-mails a digest. Telegram is not built yet (spec §10 Q6).
 - **Sweeper:** reservations still open after max duration + 300 s are released, using `pkg_cdr.real_sessiontime` when the call was recorded, otherwise counted as an unanswered attempt. Released reservations are purged after 1 day, and minute buckets after 32 days.
+
+## 10. Panel (implemented in Phase 4)
+
+- **UI delivery:** production serves one compiled `app.js` per theme (about 28) and a build-generated `index.html`. `MBilling.Application` and `bootstrap.js` aren't even in the repo. So the screens are a standalone `resources/trunkcaps/trunkcaps.js`, defined at runtime on top of the `Ext.ux.*` base classes in the bundle. It's injected from `index.php`, which every `index.html` variant loads, with a file-mtime cache-buster. No Sencha Cmd is needed.
+  - Two Ext 6 gotchas: no `'use strict'` (`callParent()` breaks), and local-store tagfields crash in `refreshEmptyText` before render. A guarded subclass fixes the latter.
+- **Schema step 4:** `override_until` on policies. Menu entries under Routes for admin group 1: `trunkcappolicy` (crud), `trunkcapusage` (r) and `trunkcapevent` (r). `down` removes them.
+- **Controllers:**
+  - `TrunkCapPolicy`: CRUD, plus `preview` (`TrunkCapDescriber`), `reset` and `override`. Blank numeric fields are stored as `NULL`.
+  - `TrunkCapUsage`: live `TrunkCapService::status()`.
+  - `TrunkCapEvent`: read-only.
+- **Semantics settled while testing the panel:**
+  - Safety margin applies to period limits only, not to concurrency or CPS (§9).
+  - A **paused** policy isn't enforced but **still counts** usage.
+  - Reset zeroes billed and answered counts and keeps in-flight reservations. `attempts` keeps the in-flight calls.
+  - Block snapshots carry `limit_type`.
+- **Call Diagnostics:** `TRUNK_CAP_*` events map to readable rows (`TrunkCapPanel::diagnosticDetails`), via 3 lines in `CallDiagnosticService::eventDisplayDetails`.
+- **Known limitation:** with direct media on both legs, `Magnus::run_dial` removes `L()`, so a minutes cap can't cut a call that's already in progress (documented in ADMIN.md).
+- **Tested** in the real prebuilt panel (upstream package + this fork, served locally against a throwaway DB with upstream migrations 8.0.0.0 → 8.0.0.15 applied) in Chrome:
+  - Menu entries appear.
+  - Editing and creating policies, live preview, and server validation errors all work. Blanks are stored as `NULL`.
+  - The usage view shows at-limit, paused and outside-window states correctly.
+  - The log shows readable block and warning details.
+  - Reset, pause and end pause work, and each is audited with the user ID.
