@@ -40,6 +40,7 @@ class TrunkCapPolicy extends Model
             ['period_type', 'in', 'range' => ['hour', 'day', 'week', 'month', 'custom']],
             ['anchor', 'in', 'range' => ['calendar', 'billing_day', 'rolling']],
             ['on_limit', 'in', 'range' => ['skip_trunk', 'reject']],
+            ['reserve_mode', 'in', 'range' => ['adaptive', 'full']],
             ['window_start, window_end', 'match', 'pattern' => '/^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/', 'allowEmpty' => true],
             ['warn_pct', 'match', 'pattern' => '/^(\d{1,3}(,\d{1,3})*)?$/', 'message' => Yii::t('zii', 'Use comma-separated percentages. Ex: 80,90')],
             ['timezone', 'checkTimezone'],

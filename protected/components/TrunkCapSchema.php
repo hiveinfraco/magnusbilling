@@ -13,6 +13,7 @@
 class TrunkCapSchema
 {
     const VERSION_KEY = 'trunkcaps_schema_version';
+    const CRON_FILE   = '/etc/cron.d/magnusbilling-trunkcaps';
 
     /** @var CDbConnection */
     private $db;
@@ -89,16 +90,96 @@ class TrunkCapSchema
             $this->say('Dropped ' . $table . '.');
         }
 
-        $this->db->createCommand('DELETE FROM pkg_configuration WHERE config_key = :key')
+        $this->db->createCommand("DELETE FROM pkg_configuration WHERE config_key IN (:key, 'trunkcaps_alert_email')")
             ->execute([':key' => self::VERSION_KEY]);
-        $this->say('Removed ' . self::VERSION_KEY . '.');
+        $this->say('Removed ' . self::VERSION_KEY . ' and trunkcaps_alert_email.');
+
+        if (file_exists(self::CRON_FILE) && @unlink(self::CRON_FILE)) {
+            $this->say('Removed ' . self::CRON_FILE . '.');
+        }
     }
 
     private function steps()
     {
         return [
             [$this, 'step1CreateTables'],
+            [$this, 'step2ReservationAccounting'],
+            [$this, 'step3SweepAndAlerts'],
         ];
+    }
+
+    /**
+     * Warning e-mail bookkeeping, the alert address setting, and the
+     * per-minute sweeper cron entry.
+     */
+    private function step3SweepAndAlerts()
+    {
+        if (! $this->columnExists('pkg_trunk_cap_event', 'notified_at')) {
+            $this->db->createCommand(
+                'ALTER TABLE `pkg_trunk_cap_event` ADD `notified_at` datetime DEFAULT NULL AFTER `id_user`,
+                 ADD KEY `idx_event_notified` (`event`, `notified_at`)'
+            )->execute();
+        }
+
+        $this->db->createCommand(
+            "INSERT INTO pkg_configuration
+                (config_title, config_key, config_value, config_description, config_group_title, status)
+             SELECT 'Trunk caps alert e-mail', 'trunkcaps_alert_email', '',
+                'Comma-separated addresses that receive trunk cap warnings. Uses the admin SMTP settings.', 'global', 1
+             FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM pkg_configuration WHERE config_key = 'trunkcaps_alert_email')"
+        )->execute();
+
+        $this->installCron();
+    }
+
+    private function installCron()
+    {
+        if (! is_dir(dirname(self::CRON_FILE)) || ! is_writable(dirname(self::CRON_FILE))) {
+            $this->say('Skipped ' . self::CRON_FILE . ' (directory not writable). Schedule "php cron.php TrunkCapSweep" every minute by hand.');
+            return;
+        }
+        file_put_contents(
+            self::CRON_FILE,
+            "# MagnusBilling trunk caps: release stale reservations, send cap warnings\n"
+                . "* * * * * root flock -n /tmp/trunkcaps-sweep.lock php /var/www/html/mbilling/cron.php TrunkCapSweep >/dev/null 2>&1\n"
+        );
+        chmod(self::CRON_FILE, 0644);
+        $this->say('Installed ' . self::CRON_FILE . '.');
+    }
+
+    /**
+     * In-flight call counts per window, per-call maximum duration, and the
+     * per-policy reservation mode (adaptive | full).
+     */
+    private function step2ReservationAccounting()
+    {
+        foreach (['pkg_trunk_cap_usage', 'pkg_trunk_cap_minute'] as $table) {
+            if (! $this->columnExists($table, 'reserved_calls')) {
+                $this->db->createCommand(
+                    "ALTER TABLE `$table` ADD `reserved_calls` int unsigned NOT NULL DEFAULT '0' AFTER `attempts`"
+                )->execute();
+            }
+        }
+        if (! $this->columnExists('pkg_trunk_cap_policy', 'reserve_mode')) {
+            $this->db->createCommand(
+                "ALTER TABLE `pkg_trunk_cap_policy` ADD `reserve_mode` enum('adaptive','full') NOT NULL DEFAULT 'adaptive'
+                 COMMENT 'full = reserve each call''s maximum duration; never overshoots' AFTER `on_limit`"
+            )->execute();
+        }
+        if (! $this->columnExists('pkg_trunk_cap_reservation', 'max_seconds')) {
+            $this->db->createCommand(
+                "ALTER TABLE `pkg_trunk_cap_reservation` ADD `max_seconds` int unsigned NOT NULL DEFAULT '0'
+                 COMMENT 'dial time limit given to the call' AFTER `expected_seconds`"
+            )->execute();
+        }
+    }
+
+    private function columnExists($table, $column)
+    {
+        return (int) $this->db->createCommand(
+            'SELECT COUNT(*) FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t AND COLUMN_NAME = :c'
+        )->queryScalar([':t' => $table, ':c' => $column]) > 0;
     }
 
     private function step1CreateTables()

@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- PHPUnit 9. Run from the repo root: phpunit -c protected/tests/phpunit.xml.dist -->
+<!-- PHPUnit 9, run from the repo root. Unit suite needs no DB; the integration
+     suite needs a migrated dev database (see integration/TrunkCapServiceTest.php). -->
 <phpunit colors="true" failOnWarning="true">
     <testsuites>
         <testsuite name="unit">
             <directory>unit</directory>
+        </testsuite>
+        <testsuite name="integration">
+            <directory>integration</directory>
         </testsuite>
     </testsuites>
 </phpunit>
