@@ -163,12 +163,16 @@ Dev VM: Proxmox VM 540 `mbilling-dev`, Debian 12, MagnusBilling 8 from the upstr
 | Test | Checks | Result |
 |---|---|---|
 | T0 smoke | 4 | pass |
-| T1 100 simultaneous calls, cap 10 concurrent | 5 | pass: exactly 10 answered, CDR peak overlap 10, 90 blocked |
+| T1 100 simultaneous calls, cap 10 concurrent | 6 | pass: exactly 10 answered, CDR peak overlap 10, 90 blocked, all 100 calls got a final response |
 | T2 cap-based failover A → B | 3 | pass |
 | T3 all trunks capped | 5 | pass after a fix (below) |
 | T4 cut-off at remaining minutes | 4 | pass: the network ended the call at 120 s, counter 120 s |
 | T5 Asterisk SIGKILL mid-call + sweep | 5 | pass (expiry fast-forwarded) |
 | T6 40 calls vs the fake provider's records, 60/60 billing | 5 | pass: cap counter = provider billed seconds exactly; reconciliation `ok` |
+| T7 nothing dialed, no caps involved (trunks inactive) | 2 | pass (added 2026-10-14, after the `Magnus::hangup()` fix) |
+| T8 CDR seeding of a new policy | 5 | pass: seeded counter = the day's CDRs; the next call counted once |
+
+Rerun on 2026-10-14 after redeploying (upstream `update.sh` had reverted the fork overnight): 38/38 checks pass. One earlier T1 run that day left 23 of 100 calls without a cap decision, 10 of them with no final SIP response. That run took 2 min 39 s instead of about 30 s, SIPp's overload watchdog tripped 1,412 times, and the Proxmox host's load peaked (about 20) at that moment. The failure didn't reproduce in 10 further T1 runs, including 5 started at the cron minute boundary. It was most likely host contention, not the cap logic: in every run, each call that reached the cap check got a decision. The kit now keeps Asterisk's verbose log per run to trace any recurrence. Production sizing must leave headroom (open question 4).
 
 **Product bug found and fixed:** when caps blocked every trunk, MagnusBilling hung up with cause 0. Asterisk rejects that value, so the caller got no final SIP response and waited until its own timeout. The before-hook now hangs up with cause 34, giving a prompt 503. `HANGUPCAUSE` can't be set because it's read-only, so the hook has to hang up itself.
 
