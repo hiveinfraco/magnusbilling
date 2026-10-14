@@ -108,7 +108,9 @@ if (! idOf('pkg_sip', 'name', 'tcrc-sip')) {
          VALUES (:u, 'tcrc-sip', 'tcrc', 'tcrc-sip', :s, 'dynamic', 'billing', 'ulaw,alaw', 'no', '15550001')",
         [':u' => $user, ':s' => $secret]);
 }
-run("UPDATE pkg_sip SET secret = :s, id_user = :u WHERE name = 'tcrc-sip'", [':s' => $secret, ':u' => $user]);
+// calllimit -1 (unlimited) like the panel: newer MagnusBilling releases reject a SIP account whose
+// calllimit == 0, and NULL compares equal to 0 in PHP.
+run("UPDATE pkg_sip SET secret = :s, id_user = :u, calllimit = -1 WHERE name = 'tcrc-sip'", [':s' => $secret, ':u' => $user]);
 
 file_put_contents('/root/tcrc.env', "TCRC_SIP_USER=tcrc-sip\nTCRC_SIP_PASS=$secret\nTCRC_PREFIX=" . PREFIX
     . "\nTCRC_TRUNK_A=$trunkA\nTCRC_TRUNK_B=$trunkB\nTCRC_GROUP=$group\n");
