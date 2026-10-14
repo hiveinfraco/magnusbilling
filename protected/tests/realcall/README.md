@@ -25,12 +25,14 @@ The fake providers listen on their own loopback addresses: if a trunk's host wer
    bash protected/tests/realcall/run.sh         # all tests, ~16 min; or: run.sh T2 T3
    ```
 
+Each run writes Asterisk's verbose log, AGI output included, to `asterisk.log` in its results directory.
+
 ## Tests
 
 | | What | Pass criteria |
 |---|---|---|
 | T0 | One call | Answered, one CDR on tcrc-a, counted, no open reservation |
-| T1 | 100 simultaneous calls; tcrc-a limited to 10 concurrent; no failover trunk | Exactly 10 answered and 10 CDRs; peak overlap in the CDRs ≤ 10; 90 `blocked` events |
+| T1 | 100 simultaneous calls; tcrc-a limited to 10 concurrent; no failover trunk | Exactly 10 answered and 10 CDRs; all 100 calls get a final response; peak overlap in the CDRs ≤ 10; 90 `blocked` events |
 | T2 | tcrc-a capped at 5 calls/day; group A → B; 8 calls | 5 CDRs on tcrc-a, 3 on tcrc-b |
 | T3 | Both trunks at their cap | Caller gets a SIP error; no CDR; `blocked` events on both trunks for that call |
 | T4 | 2 minutes left on tcrc-a; caller never hangs up | The network ends the call at about 120 s; counter = 120 s; the next call is blocked |

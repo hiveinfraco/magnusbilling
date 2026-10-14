@@ -177,5 +177,7 @@ Dev VM: Proxmox VM 540 `mbilling-dev`, Debian 12, MagnusBilling 8 from the upstr
 **Upstream MagnusBilling issues seen (not trunk caps):**
 - The PJSIP generator drops the port for IP trunks without a username. The port has to go in the host field.
 - The generator writes `qualify` verbatim as `qualify_frequency`, so "no" or "0" makes Asterisk drop the trunk's AOR silently.
+- The installer adds a root cron `30 1 * * * protected/commands/update.sh`. It overwrites the web root with the latest upstream package every night, removing the fork's core edits and replacing the trunk caps hook files with the stock ones. This happened on the dev VM on 2026-10-14. Choose one update path (spec Phase 6): with the fork, disable that cron line and deploy with `deploy-dev.sh` or a release process.
+- Newer releases reject a SIP account whose `calllimit == 0` ("Send Congestion user call limit"). A NULL `calllimit` (an account inserted by SQL) compares equal to 0 in PHP, so it is rejected too. Panel-created accounts get -1.
 - Calls with no dial at all hung up with the invalid cause 0 (no provider credit, all trunks inactive, and so on), and the caller got no SIP response. Fixed in `Magnus::hangup()` (3 lines): a missing or 0 cause becomes 34, so the caller gets a 503.
 - The download package is ahead of the GitHub `source` branch.

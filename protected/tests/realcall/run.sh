@@ -45,7 +45,16 @@ start_providers() {
     say "trunk contacts: $(asterisk -rx 'pjsip show contacts' | grep -E 'tcrc-[ab]/' | awk '{print $2, $4}' | tr '\n' ' ')"
 }
 stop_providers() { for p in "${PROVIDER_PIDS[@]}"; do kill "$p" 2>/dev/null; done; }
-trap stop_providers EXIT
+# Asterisk verbose output (AGI included) for the whole run, so a failure can be traced per call.
+# Asterisk (user asterisk) cannot write to $OUT, so log under /var/log/asterisk and move it at the end.
+ASTLOG=/var/log/asterisk/tcrc-run-$(basename "$OUT").log
+start_asterisk_log() { asterisk -rx "core set verbose 5" >/dev/null; asterisk -rx "logger add channel $ASTLOG VERBOSE,NOTICE,WARNING,ERROR" >/dev/null; }
+stop_asterisk_log() {
+    asterisk -rx "logger remove channel $ASTLOG" >/dev/null 2>&1
+    [ -f "$ASTLOG" ] && mv "$ASTLOG" "$OUT/asterisk.log"
+}
+cleanup() { stop_providers; stop_asterisk_log; }
+trap cleanup EXIT
 
 CALLER_PORT=5070
 # calls NAME COUNT RATE_PER_S HOLD_MS [SCENARIO] [MAX_CONCURRENT] - runs and waits
@@ -102,6 +111,7 @@ T1() {
     local t; t=$(php_now)
     calls t1 100 100 20000
     check "answered" "$(answered t1)" 10
+    check "every call got a final response (answered + rejected)" "$(( $(answered t1) + $(count_lines REJECTED "$OUT/t1.log") ))" 100
     check "CDRs on tcrc-a" "$(cdr_count "$TCRC_TRUNK_A" "$t")" 10
     # peak overlap of answered calls, from the CDRs themselves
     check_range "peak simultaneous calls on tcrc-a (CDR overlap)" "$(sql "SELECT COALESCE(MAX(n), 0) FROM (SELECT (SELECT COUNT(*) FROM pkg_cdr d
@@ -160,7 +170,7 @@ T5() {
     sleep 15
     check "open reservations while calls are up" "$(open_reservations)" 3
     systemctl kill --signal=KILL asterisk; sleep 3; kill "$pid" 2>/dev/null
-    systemctl start asterisk; sleep 8
+    systemctl start asterisk; sleep 8; start_asterisk_log
     check "reservations still open after the crash" "$(open_reservations)" 3
     # Fast-forward: real expiry is max duration + 300 s. Only the clock is faked; state and sweeper are real.
     sql "UPDATE pkg_trunk_cap_reservation SET expires_at = UTC_TIMESTAMP() - INTERVAL 1 SECOND WHERE id_trunk = $TCRC_TRUNK_A AND released_at IS NULL"
@@ -234,6 +244,7 @@ T8() {
 
 command -v sipp >/dev/null || { echo "sipp is not installed (apt install sip-tester)"; exit 2; }
 say "Results in $OUT"
+start_asterisk_log
 start_providers
 for t in ${@:-T0 T1 T2 T3 T4 T5 T6 T7 T8}; do "$t"; done
 reset_caps; group AB
