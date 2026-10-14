@@ -196,6 +196,9 @@ class Magnus
         if ($code == '') {
             $code = $agi->get_variable("HANGUPCAUSE", true);
         }
+        if ((int) $code < 1) {
+            $code = 34; // nothing was dialed: HANGUP 0 is invalid and the caller would get no SIP response
+        }
         $agi->execute("HANGUP $code");
 
         exit;
