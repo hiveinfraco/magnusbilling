@@ -75,8 +75,8 @@ group() { # group A | AB
          INSERT INTO pkg_trunk_group_trunk (id_trunk_group, id_trunk) VALUES ($TCRC_GROUP, $TCRC_TRUNK_A);"
     [ "$1" = "AB" ] && sql "INSERT INTO pkg_trunk_group_trunk (id_trunk_group, id_trunk) VALUES ($TCRC_GROUP, $TCRC_TRUNK_B);"
 }
-policy() { # policy TRUNK_ID "col=val, col=val"
-    sql "INSERT INTO pkg_trunk_cap_policy SET id_trunk = $1, name = 'tcrc', timezone = 'UTC', warn_pct = '', $2;"
+policy() { # policy TRUNK_ID "col=val, col=val" - marked seeded: tests count from zero (T8 tests seeding)
+    sql "INSERT INTO pkg_trunk_cap_policy SET id_trunk = $1, name = 'tcrc', timezone = 'UTC', warn_pct = '', cdr_seeded_at = UTC_TIMESTAMP(), $2;"
 }
 since() { date -u -d "-$1 seconds" '+%Y-%m-%d %H:%M:%S'; }
 cdr_count() { sql "SELECT COUNT(*) FROM pkg_cdr WHERE id_trunk = $1 AND starttime >= '$2'"; }
@@ -202,10 +202,40 @@ T6() {
     check "reconciliation status for tcrc-a" "$(awk '$1 == "tcrc-a" && $2 ~ /'"$day"'/ { print $NF }' "$OUT/t6-reconcile.txt" | head -1)" ok
 }
 
+T7() {
+    say "T7 nothing dialed for a non-cap reason (both trunks inactive) -> prompt 503, not silence"
+    reset_caps; group AB
+    sql "UPDATE pkg_trunk SET status = 0 WHERE id IN ($TCRC_TRUNK_A, $TCRC_TRUNK_B)"
+    calls t7 1 1 2000 uac_auth.xml 1 -trace_msg -message_file "$OUT/t7-msg.log"
+    sql "UPDATE pkg_trunk SET status = 1 WHERE id IN ($TCRC_TRUNK_A, $TCRC_TRUNK_B)"
+    check "answered" "$(answered t7)" 0
+    check "caller got a final 503 (not silence)" "$(grep -c 'SIP/2.0 503' "$OUT/t7-msg.log" 2>/dev/null || true)" 1
+}
+
+T8() {
+    say "T8 CDR seeding: today's calls made before a policy exists are counted once it is created"
+    reset_caps; group A
+    calls t8 3 1 7000
+    local day; day=$(php -r 'echo date("Y-m-d 00:00:00");')
+    local calls billed attempts
+    calls=$(sql "SELECT COUNT(*) FROM pkg_cdr WHERE id_trunk = $TCRC_TRUNK_A AND starttime >= '$day' AND real_sessiontime > 0")
+    billed=$(sql "SELECT COALESCE(SUM(CEIL(real_sessiontime / 60) * 60), 0) FROM pkg_cdr WHERE id_trunk = $TCRC_TRUNK_A AND starttime >= '$day'")
+    attempts=$(( $(cdr_count "$TCRC_TRUNK_A" "$day") + $(sql "SELECT COUNT(*) FROM pkg_cdr_failed WHERE id_trunk = $TCRC_TRUNK_A AND starttime >= '$day'") ))
+    sql "INSERT INTO pkg_trunk_cap_policy SET id_trunk = $TCRC_TRUNK_A, name = 'tcrc', timezone = 'UTC', warn_pct = '', max_calls = 100000, period_type = 'day'"
+    php "$MB/cron.php" TrunkCapSweep >>"$OUT/t8-sweep.txt" 2>&1
+    local u="SELECT %s FROM pkg_trunk_cap_usage u JOIN pkg_trunk_cap_policy p ON p.id = u.id_policy WHERE p.id_trunk = $TCRC_TRUNK_A"
+    check "seeded calls = answered CDRs today" "$(sql "$(printf "$u" calls)")" "$calls"
+    check "seeded billed seconds = CDR seconds at 60/60" "$(sql "$(printf "$u" billed_seconds)")" "$billed"
+    check "seeded attempts = CDRs + failed CDRs today" "$(sql "$(printf "$u" attempts)")" "$attempts"
+    check "one seeded event" "$(sql "SELECT COUNT(*) FROM pkg_trunk_cap_event WHERE id_trunk = $TCRC_TRUNK_A AND event = 'seeded'")" 1
+    calls t8b 1 1 3000
+    check "next call counted live, once" "$(sql "$(printf "$u" calls)")" "$((calls + 1))"
+}
+
 command -v sipp >/dev/null || { echo "sipp is not installed (apt install sip-tester)"; exit 2; }
 say "Results in $OUT"
 start_providers
-for t in ${@:-T0 T1 T2 T3 T4 T5 T6}; do "$t"; done
+for t in ${@:-T0 T1 T2 T3 T4 T5 T6 T7 T8}; do "$t"; done
 reset_caps; group AB
 say "DONE: $PASSES passed, $FAILS failed"
 [ "$FAILS" -eq 0 ]

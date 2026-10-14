@@ -22,7 +22,7 @@ The fake providers listen on their own loopback addresses: if a trunk's host wer
    ```
    cd /var/www/html/mbilling
    php protected/tests/realcall/setup.php      # tcrc-* records; secrets in /root/tcrc.env
-   bash protected/tests/realcall/run.sh         # all tests, ~15 min; or: run.sh T2 T3
+   bash protected/tests/realcall/run.sh         # all tests, ~16 min; or: run.sh T2 T3
    ```
 
 ## Tests
@@ -36,6 +36,8 @@ The fake providers listen on their own loopback addresses: if a trunk's host wer
 | T4 | 2 minutes left on tcrc-a; caller never hangs up | The network ends the call at about 120 s; counter = 120 s; the next call is blocked |
 | T5 | 3 calls up, Asterisk killed with SIGKILL | Reservations stay open; after the sweep, 0 open and 3 `swept` events; a new call works |
 | T6 | 40 calls from 7 s to 119 s, provider bills 60/60 | 40 calls on both sides; cap counter within 2% of the provider's billed seconds; reconciliation report status `ok` |
+| T7 | Both trunks inactive (nothing dialed, no caps involved) | Caller gets a final 503, not silence |
+| T8 | 3 calls with no policy, then a daily policy is created | After the sweep, the counter equals today's CDRs (calls, 60/60 seconds, attempts) and one `seeded` event exists; the next call is counted once |
 
 T5 fast-forwards one thing: it sets the stale reservations' `expires_at` to now, instead of waiting for max duration + 5 minutes. The crash, the left-over state and the sweeper are all real.
 
