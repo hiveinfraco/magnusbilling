@@ -116,7 +116,24 @@ class TrunkCapSchema
             [$this, 'step3SweepAndAlerts'],
             [$this, 'step4PanelModules'],
             [$this, 'step5TelegramAndReconciliation'],
+            [$this, 'step6CdrSeeding'],
         ];
+    }
+
+    /** CDR seeding of new policies: per-policy marker and the 'seeded' audit event. */
+    private function step6CdrSeeding()
+    {
+        $this->db->createCommand(
+            "ALTER TABLE `pkg_trunk_cap_event`
+             MODIFY `event` enum('warned','blocked','reset','override','swept','seeded') NOT NULL"
+        )->execute();
+        if (! $this->columnExists('pkg_trunk_cap_policy', 'cdr_seeded_at')) {
+            $this->db->createCommand(
+                "ALTER TABLE `pkg_trunk_cap_policy` ADD `cdr_seeded_at` datetime DEFAULT NULL
+                 COMMENT 'UTC; usage before created_at was counted from CDR' AFTER `override_until`"
+            )->execute();
+        }
+        $this->say('Policies are now seeded from CDR when created (the sweep seeds existing ones within a minute).');
     }
 
     /**

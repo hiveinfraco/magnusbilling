@@ -71,9 +71,17 @@ A call is counted entirely in the period it **started** in.
 
 The caller gets a **503 Service Unavailable** within seconds (hangup cause 34). Upstream carriers and phones treat it as "try elsewhere or later". The AGI log shows `TRUNK_CAP_ALL_BLOCKED`, and every skipped trunk gets a `blocked` row in the Trunk Cap Log.
 
-## A new policy counts from the moment it is created
+## A new policy starts with this period's CDR traffic
 
-Counters start at zero when a policy is created or reactivated. Calls made earlier in the same period are **not** counted. For example, if you add a monthly cap on the 15th, the first half of the month isn't in the counter. Until counters are reconciled from CDRs, lower the first period's limit by the minutes already used (see Trunk Cap Reconciliation for the CDR figure).
+When you create a policy, its counters are seeded from the CDRs of its trunk, from the start of the current period up to the moment the policy was saved. Calls after that are counted live, and calls that already hold a reservation are skipped, so no call is counted twice. Answered calls add a call and their provider-rounded seconds, using the policy's rounding or else the provider buy rate for the CDR's prefix. Failed calls (`pkg_cdr_failed`) add an attempt. Time-of-day/weekday windows are honoured, and rolling policies fill their minute buckets.
+
+Seeding runs once per policy. The Trunk Cap Log shows it as a `seeded` event with the range and totals. Policies created by SQL, or whose seeding failed in the panel, are seeded by the per-minute sweep.
+
+Limits of seeding:
+- Calls still in progress when the policy is saved have no CDR yet. They are not counted.
+- Editing a policy later (for example from daily to monthly) doesn't re-seed it. Create a new policy instead.
+- A policy that was inactive and is reactivated counts live only from reactivation.
+- Rounding uses the CDR's matched customer prefix to find the provider rate, which can differ from the live lookup on the dialled number when the provider has longer prefixes than the customer rate. Set the policy's own rounding when that matters.
 
 ## Warnings: e-mail and Telegram
 

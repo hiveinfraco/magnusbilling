@@ -58,6 +58,19 @@ class TrunkCapPolicyController extends Controller
         return $attributes;
     }
 
+    /** A new policy starts with the traffic its trunk already carried this window (the sweep retries on failure). */
+    public function afterSave($model, $values)
+    {
+        if (! $this->success || ! empty($values['id']) || empty($model->id)) {
+            return;
+        }
+        try {
+            $this->service()->seedFromCdr((int) $model->id, (int) Yii::app()->session['id_user']);
+        } catch (Exception $e) {
+            Yii::log('Trunk caps: seeding policy ' . $model->id . ' from CDR failed: ' . $e->getMessage(), 'error');
+        }
+    }
+
     /** Plain-language description of the values currently in the form. */
     public function actionPreview()
     {

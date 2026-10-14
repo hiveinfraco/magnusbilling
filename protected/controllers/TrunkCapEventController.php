@@ -1,6 +1,6 @@
 <?php
 /**
- * Trunk cap audit log (blocked, warned, reset, override, swept). Read-only.
+ * Trunk cap audit log (blocked, warned, reset, override, swept, seeded). Read-only.
  *
  * This software is released under the terms of the GNU Lesser General Public License v3
  * A copy of which is available from http://www.gnu.org/copyleft/lesser.html

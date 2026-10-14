@@ -80,7 +80,7 @@ pkg_trunk_cap_lock     id_trunk PK                                              
 pkg_trunk_cap_reservation id, id_trunk, uniqueid, expected_seconds, allocations TEXT(JSON),
                        created_at DATETIME(3), expires_at, released_at NULL, dialstatus
                        KEY(id_trunk, released_at), KEY(id_trunk, created_at), KEY(expires_at)
-pkg_trunk_cap_event    id, created_at, id_trunk, id_policy, event ENUM(warned,blocked,reset,override,swept),
+pkg_trunk_cap_event    id, created_at, id_trunk, id_policy, event ENUM(warned,blocked,reset,override,swept,seeded),
                        snapshot TEXT(JSON), uniqueid, id_user                           KEY(id_trunk, created_at)
 ```
 
@@ -172,10 +172,10 @@ Dev VM: Proxmox VM 540 `mbilling-dev`, Debian 12, MagnusBilling 8 from the upstr
 
 **Product bug found and fixed:** when caps blocked every trunk, MagnusBilling hung up with cause 0. Asterisk rejects that value, so the caller got no final SIP response and waited until its own timeout. The before-hook now hangs up with cause 34, giving a prompt 503. `HANGUPCAUSE` can't be set because it's read-only, so the hook has to hang up itself.
 
-**Limitation found:** a new policy counts from its creation. A mid-period policy therefore misses earlier usage (ADMIN.md). The spec's "reconcile counters against CDR" cron would close this gap and isn't built yet.
+**Limitation found and fixed:** a new policy counted only from its creation, so a mid-period policy missed earlier usage. Schema step 6 adds CDR seeding (`TrunkCapService::seedFromCdr`): run on create from the panel, with the sweep as a fallback. See ADMIN.md.
 
 **Upstream MagnusBilling issues seen (not trunk caps):**
 - The PJSIP generator drops the port for IP trunks without a username. The port has to go in the host field.
 - The generator writes `qualify` verbatim as `qualify_frequency`, so "no" or "0" makes Asterisk drop the trunk's AOR silently.
-- Calls with no dial at all hang up with the invalid cause 0, which also happens on the upstream paths for no provider credit or all trunks inactive.
+- Calls with no dial at all hung up with the invalid cause 0 (no provider credit, all trunks inactive, and so on), and the caller got no SIP response. Fixed in `Magnus::hangup()` (3 lines): a missing or 0 cause becomes 34, so the caller gets a 503.
 - The download package is ahead of the GitHub `source` branch.

@@ -583,6 +583,10 @@
             if (s.hasOwnProperty('override_until')) {
                 return s.override_until ? t('paused until') + ' ' + s.override_until + ' UTC' : t('pause ended');
             }
+            if (s.hasOwnProperty('skipped_live')) {
+                return t('from CDR') + ' ' + s.window_start + ' → ' + s.until + ' UTC: ' + s.calls + ' ' + t('calls') + ', '
+                    + s.attempts + ' ' + t('attempts') + ', ' + Math.round(s.billed_seconds / 60) + ' ' + t('min');
+            }
             if (s.reservation) {
                 return t('reservation') + ' ' + s.reservation + (s.cdr_seconds !== null && s.cdr_seconds !== undefined ? ', CDR ' + s.cdr_seconds + 's' : '');
             }
@@ -607,7 +611,7 @@
                     header: t('Policy'), dataIndex: 'idPolicyname', flex: 2
                 }, {
                     header: t('Event'), dataIndex: 'event', flex: 1.2,
-                    filter: { type: 'list', options: [['blocked', 'blocked'], ['warned', 'warned'], ['reset', 'reset'], ['override', 'override'], ['swept', 'swept']] }
+                    filter: { type: 'list', options: [['blocked', 'blocked'], ['warned', 'warned'], ['reset', 'reset'], ['override', 'override'], ['swept', 'swept'], ['seeded', 'seeded']] }
                 }, {
                     header: t('Details'), dataIndex: 'snapshot', flex: 4, sortable: false,
                     renderer: function (v) { return Ext.String.htmlEncode(snapshotText(v)); }

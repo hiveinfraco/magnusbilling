@@ -30,7 +30,7 @@ class TrunkCapEvent extends Model
         $rules = [
             ['id_trunk, event', 'required'],
             ['id_trunk, id_policy, id_user', 'numerical', 'integerOnly' => true],
-            ['event', 'in', 'range' => ['warned', 'blocked', 'reset', 'override', 'swept']],
+            ['event', 'in', 'range' => ['warned', 'blocked', 'reset', 'override', 'swept', 'seeded']],
             ['uniqueid', 'length', 'max' => 50],
         ];
         return $this->getExtraField($rules);

@@ -7,7 +7,9 @@
  * 1. Releases reservations whose AGI died (crash, kill, server restart),
  *    using pkg_cdr for the answered time when the call was recorded.
  * 2. Purges released reservations and old rolling-window buckets.
- * 3. Sends a digest of new warning events by e-mail (trunkcaps_alert_email,
+ * 3. Seeds new policies from CDR (TrunkCapService::seedPending), in case the
+ *    panel did not (policy inserted by SQL, or seeding failed).
+ * 4. Sends a digest of new warning events by e-mail (trunkcaps_alert_email,
  *    admin SMTP) and Telegram (trunkcaps_telegram_*), each channel tracked
  *    separately in pkg_trunk_cap_event.notified_at / telegram_at.
  *
@@ -26,7 +28,8 @@ class TrunkCapSweepCommand extends CConsoleCommand
             fwrite($error ? STDERR : STDOUT, '[TrunkCapSweep] ' . $message . PHP_EOL);
         });
 
-        $result = $service->sweep();
+        $result           = $service->sweep();
+        $result['seeded'] = $service->seedPending();
         if (array_sum($result) > 0) {
             echo '[TrunkCapSweep] ' . json_encode($result) . PHP_EOL;
         }

@@ -49,6 +49,7 @@ class TrunkCapServiceTest extends TestCase
             self::$db->exec('DELETE FROM pkg_trunk_cap_reservation WHERE id_trunk = ' . (int) $id);
             self::$db->exec('DELETE FROM pkg_trunk_cap_event WHERE id_trunk = ' . (int) $id);
             self::$db->exec('DELETE FROM pkg_cdr WHERE id_trunk = ' . (int) $id);
+            self::$db->exec('DELETE FROM pkg_cdr_failed WHERE id_trunk = ' . (int) $id);
             self::$db->exec('DELETE FROM pkg_trunk WHERE id = ' . (int) $id); // cascades policies, usage, minutes, lock
         }
     }
@@ -77,6 +78,33 @@ class TrunkCapServiceTest extends TestCase
             VALUES (' . implode(',', array_fill(0, count($row), '?')) . ')');
         $stmt->execute(array_values($row));
         return (int) self::$db->lastInsertId();
+    }
+
+    /** CDR on a trunk; $ts is UTC epoch (starttime is a TIMESTAMP, so stored through FROM_UNIXTIME). */
+    private function cdr($idTrunk, $uniqueid, $ts, $seconds, $idPrefix = 1)
+    {
+        self::$db->prepare("INSERT INTO pkg_cdr (id_user, id_plan, id_trunk, uniqueid, starttime, sessiontime, real_sessiontime,
+                calledstation, src, sipiax, sessionbill, id_prefix, terminatecauseid)
+            VALUES (1, 1, ?, ?, FROM_UNIXTIME(?), ?, ?, '000', '000', 0, 0, ?, 1)")
+            ->execute([$idTrunk, $uniqueid, $ts, $seconds, $seconds, $idPrefix]);
+    }
+
+    private function failedCdr($idTrunk, $uniqueid, $ts)
+    {
+        self::$db->prepare("INSERT INTO pkg_cdr_failed (id_user, id_trunk, uniqueid, starttime, calledstation, src)
+            VALUES (1, ?, ?, FROM_UNIXTIME(?), '000', '000')")->execute([$idTrunk, $uniqueid, $ts]);
+    }
+
+    private function createdAt($idPolicy, $ts)
+    {
+        self::$db->exec('UPDATE pkg_trunk_cap_policy SET created_at = FROM_UNIXTIME(' . (int) $ts . ') WHERE id = ' . (int) $idPolicy);
+    }
+
+    private function prefixId($prefix)
+    {
+        self::$db->exec("INSERT INTO pkg_prefix (prefix, destination) SELECT '$prefix', 'tctest'
+            WHERE NOT EXISTS (SELECT 1 FROM pkg_prefix WHERE prefix = '$prefix')");
+        return (int) self::$db->query("SELECT id FROM pkg_prefix WHERE prefix = '$prefix'")->fetchColumn();
     }
 
     private function service($db = null)
@@ -511,6 +539,77 @@ class TrunkCapServiceTest extends TestCase
 
         $this->now += TrunkCapService::KEEP_RELEASED_SECONDS + 10;
         $this->assertSame(2, $s->sweep()['purged_reservations']);
+    }
+
+    // ---- seeding new policies from CDR --------------------------------------
+
+    public function testNewPolicyIsSeededFromCdrWithoutCountingAnyCallTwice()
+    {
+        $t       = $this->trunk();
+        $created = (int) $this->now - 3600; // 2026-10-13 09:00 UTC; the month started 2026-09-30 23:00 UTC (Lagos)
+        $provider = (int) self::$db->query("SELECT id FROM pkg_provider WHERE provider_name = 'tctest-provider'")->fetchColumn();
+        self::$db->exec("DELETE FROM pkg_rate_provider WHERE id_provider = $provider");
+        self::$db->exec("INSERT INTO pkg_rate_provider (id_provider, id_prefix, buyrate, buyrateinitblock, buyrateincrement)
+            VALUES ($provider, " . $this->prefixId('9997') . ', 0.01, 60, 60)');
+
+        $this->cdr($t, 'old', gmmktime(22, 0, 0, 9, 30, 2026), 30);                         // before the window
+        $this->cdr($t, 'a', gmmktime(12, 0, 0, 10, 5, 2026), 61, $this->prefixId('99971')); // 60/60 via the 9997 rate
+        $this->failedCdr($t, 'f', gmmktime(12, 0, 0, 10, 6, 2026));
+        $this->cdr($t, 'live-1', $created - 10, 50);                                          // reserved after creation
+        $this->cdr($t, 'later', $created + 1800, 100);                                        // counted live (not here)
+
+        $p = $this->policy($t, ['max_minutes' => 1000]);
+        $this->createdAt($p, $created);
+        $s = $this->service();
+        $this->now = $created + 1;
+        $s->commit($s->reserve($t, 'live-1', 600)['reservation'], 'ANSWER', 50, 60, 60);
+        $this->now = $created + 600;
+
+        $snapshot = $s->seedFromCdr($p, 7);
+        $this->assertSame(['calls' => 1, 'attempts' => 2, 'billed_seconds' => 120, 'skipped_live' => 1],
+            array_intersect_key($snapshot, array_flip(['calls', 'attempts', 'billed_seconds', 'skipped_live'])));
+        $this->assertSame('2026-09-30 23:00:00', $snapshot['window_start']);
+        $u = $this->usage($p);
+        $this->assertSame(['2', '3', '180'], [$u['calls'], $u['attempts'], $u['billed_seconds']]);
+
+        $events = $this->events($t, 'seeded');
+        $this->assertCount(1, $events);
+        $this->assertSame('7', (string) $events[0]['id_user']);
+        $this->assertFalse($s->seedFromCdr($p), 'a policy is seeded once');
+        $this->assertSame('180', $this->usage($p)['billed_seconds']);
+        self::$db->exec("DELETE FROM pkg_rate_provider WHERE id_provider = $provider");
+    }
+
+    public function testSeedingFillsRollingBucketsAndHonoursTheTimeWindow()
+    {
+        $t       = $this->trunk();
+        $created = (int) $this->now;
+        $this->cdr($t, 'in', $created - 1200, 30);   // 20 minutes before: inside the rolling hour
+        $this->cdr($t, 'out', $created - 4200, 30);  // 70 minutes before
+        $rolling = $this->policy($t, ['period_type' => 'hour', 'anchor' => 'rolling', 'max_calls' => 1]);
+        $evening = $this->policy($t, ['period_type' => 'day', 'max_calls' => 1, 'window_start' => '18:00:00', 'window_end' => '22:00:00']);
+        $this->createdAt($rolling, $created);
+        $this->createdAt($evening, $created);
+        $s = $this->service();
+
+        $this->assertSame(1, $s->seedFromCdr($rolling)['calls']);
+        $this->assertSame('1', $this->countRows("SELECT SUM(calls) FROM pkg_trunk_cap_minute WHERE id_policy = $rolling"));
+        $this->assertSame(0, $s->seedFromCdr($evening)['attempts'], 'calls at 11:00 Lagos are outside 18:00-22:00');
+        $d = $s->reserve($t, 'next', 600);
+        $this->assertFalse($d['allow']);
+        $this->assertSame($rolling, $d['id_policy']);
+    }
+
+    public function testSeedPendingMarksPoliciesFromEarlierWindowsWithoutCounting()
+    {
+        $t = $this->trunk();
+        $this->cdr($t, 'a', (int) $this->now - 600, 30);
+        $p = $this->policy($t, ['max_calls' => 5]);
+        $this->createdAt($p, gmmktime(12, 0, 0, 9, 15, 2026)); // last month: the live counter covers this month
+        $this->assertGreaterThanOrEqual(1, $this->service()->seedPending());
+        $this->assertNotNull(self::$db->query("SELECT cdr_seeded_at FROM pkg_trunk_cap_policy WHERE id = $p")->fetchColumn());
+        $this->assertFalse($this->usage($p));
+        $this->assertCount(1, $this->events($t, 'seeded'));
     }
 }
 

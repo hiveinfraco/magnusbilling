@@ -39,6 +39,10 @@ class TrunkCapService
     /** Transaction attempts on deadlock / lock wait timeout before failing open. */
     const MAX_ATTEMPTS = 3;
 
+    /** CDR seeding: rows per query, and how long before the policy existed a counted call may have started. */
+    const SEED_BATCH              = 5000;
+    const SEED_DIAL_DELAY_SECONDS = 3600;
+
     private $db;
     private $log;
     private $clock;
@@ -405,6 +409,187 @@ class TrunkCapService
         $this->exec('UPDATE pkg_trunk_cap_policy SET override_until = ? WHERE id = ?', [$until, (int) $idPolicy]);
         $this->logEvent((int) $p['id_trunk'], (int) $p['id'], 'override',
             ['override_until' => $until, 'previous' => $p['override_until']], null, $idUser);
+    }
+
+    /**
+     * Count the traffic a new policy missed: CDRs on its trunk from the start of
+     * the current window until the policy was created. Calls after that are
+     * counted live, and calls that already hold a reservation for this policy
+     * are skipped, so nothing is counted twice. Runs once per policy and is
+     * audited as a 'seeded' event.
+     *
+     * Answered calls (pkg_cdr) add a call, an attempt and their provider-rounded
+     * seconds; failed calls (pkg_cdr_failed) add an attempt. Time-of-day and
+     * weekday windows are honoured; rolling policies fill their minute buckets.
+     *
+     * @return array|false snapshot, or false if the policy was already seeded
+     */
+    public function seedFromCdr($idPolicy, $idUser = null)
+    {
+        $p = $this->row(
+            'SELECT p.*, UNIX_TIMESTAMP(p.created_at) created_ts, t.id_provider
+             FROM pkg_trunk_cap_policy p JOIN pkg_trunk t ON t.id = p.id_trunk WHERE p.id = ?',
+            [(int) $idPolicy]
+        );
+        if (! $p) {
+            throw new InvalidArgumentException('Unknown policy ' . (int) $idPolicy);
+        }
+        if ($p['cdr_seeded_at'] !== null) {
+            return false;
+        }
+
+        $idTrunk = (int) $p['id_trunk'];
+        $now     = (int) floor($this->now());
+        $period  = TrunkCapWindow::period($p, $now);
+        $from    = (int) $period['start'];
+        $to      = min((int) $p['created_ts'], $now);
+        $totals  = ['calls' => 0, 'attempts' => 0, 'billed_seconds' => 0, 'skipped_live' => 0];
+        $buckets = []; // usage window_start or minute_start => [calls, attempts, billed_seconds]
+
+        if ($from < $to) {
+            $live     = $this->liveUniqueids($idTrunk, (int) $p['id'], $to);
+            $rounding = [];
+            $sources  = [
+                ['pkg_cdr', 'real_sessiontime, id_prefix'],
+                ['pkg_cdr_failed', '0 real_sessiontime, NULL id_prefix'],
+            ];
+            foreach ($sources as $source) {
+                foreach ($this->cdrRows($source[0], $source[1], $idTrunk, $from, $to) as $cdr) {
+                    $ts = (int) $cdr['ts'];
+                    if (! TrunkCapWindow::appliesAt($p, $ts)) {
+                        continue;
+                    }
+                    if (isset($live[$cdr['uniqueid']])) {
+                        $totals['skipped_live']++;
+                        continue;
+                    }
+                    $seconds = (int) $cdr['real_sessiontime'];
+                    $billed  = 0;
+                    if ($seconds > 0) {
+                        $prefix = (int) $cdr['id_prefix'];
+                        if (! isset($rounding[$prefix])) {
+                            $rounding[$prefix] = $this->providerRounding((int) $p['id_provider'], $prefix);
+                        }
+                        $init   = $p['rounding_init_sec'] !== null ? (int) $p['rounding_init_sec'] : $rounding[$prefix][0];
+                        $inc    = $p['rounding_inc_sec'] !== null ? (int) $p['rounding_inc_sec'] : $rounding[$prefix][1];
+                        $billed = self::billedSeconds($seconds, $init, $inc);
+                    }
+                    $key = TrunkCapWindow::toDb($period['rolling'] ? TrunkCapWindow::minuteStart($ts) : $from);
+                    if (! isset($buckets[$key])) {
+                        $buckets[$key] = [0, 0, 0];
+                    }
+                    $answered = $seconds > 0 ? 1 : 0;
+                    $buckets[$key][0] += $answered;
+                    $buckets[$key][1]++;
+                    $buckets[$key][2] += $billed;
+                    $totals['calls'] += $answered;
+                    $totals['attempts']++;
+                    $totals['billed_seconds'] += $billed;
+                }
+            }
+        }
+
+        $this->ensureLockRow($idTrunk);
+        try {
+            $this->db->exec('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+            $this->db->beginTransaction();
+            $this->lockTrunk($idTrunk);
+            if ($this->scalar('SELECT cdr_seeded_at FROM pkg_trunk_cap_policy WHERE id = ? FOR UPDATE', [(int) $p['id']]) !== null) {
+                $this->db->commit();
+                return false; // seeded concurrently
+            }
+            $table  = $period['rolling'] ? 'pkg_trunk_cap_minute' : 'pkg_trunk_cap_usage';
+            $column = $period['rolling'] ? 'minute_start' : 'window_start';
+            foreach ($buckets as $start => $b) {
+                $this->exec(
+                    "INSERT INTO $table (id_policy, $column, calls, attempts, billed_seconds) VALUES (?, ?, ?, ?, ?)
+                     ON DUPLICATE KEY UPDATE calls = calls + VALUES(calls), attempts = attempts + VALUES(attempts),
+                        billed_seconds = billed_seconds + VALUES(billed_seconds)",
+                    [(int) $p['id'], $start, $b[0], $b[1], $b[2]]
+                );
+            }
+            $this->exec('UPDATE pkg_trunk_cap_policy SET cdr_seeded_at = ? WHERE id = ?', [TrunkCapWindow::toDb($now), (int) $p['id']]);
+            $this->db->commit();
+        } catch (Throwable $e) {
+            $this->rollback();
+            throw $e;
+        }
+
+        $snapshot = array_merge(['window_start' => TrunkCapWindow::toDb($from), 'until' => TrunkCapWindow::toDb(max($from, $to))], $totals);
+        $this->logEvent($idTrunk, (int) $p['id'], 'seeded', $snapshot, null, $idUser);
+        return $snapshot;
+    }
+
+    /**
+     * Seed every policy not seeded yet (new policies, also those created by SQL).
+     *
+     * @return int policies seeded
+     */
+    public function seedPending()
+    {
+        $seeded = 0;
+        foreach ($this->rows('SELECT id FROM pkg_trunk_cap_policy WHERE cdr_seeded_at IS NULL ORDER BY id LIMIT 100') as $r) {
+            try {
+                if ($this->seedFromCdr((int) $r['id']) !== false) {
+                    $seeded++;
+                }
+            } catch (Throwable $e) {
+                $this->say('Seeding policy ' . $r['id'] . ' from CDR failed: ' . $e->getMessage(), true);
+            }
+        }
+        return $seeded;
+    }
+
+    /** Calls already counted live for this policy, by uniqueid. */
+    private function liveUniqueids($idTrunk, $idPolicy, $since)
+    {
+        $live = [];
+        $rows = $this->rows(
+            'SELECT uniqueid, allocations FROM pkg_trunk_cap_reservation WHERE id_trunk = ? AND created_at >= ?',
+            [$idTrunk, TrunkCapWindow::toDb($since - self::SEED_DIAL_DELAY_SECONDS)]
+        );
+        foreach ($rows as $r) {
+            foreach ($this->decodeAllocations($r['allocations']) as $a) {
+                if ((int) $a['p'] === $idPolicy) {
+                    $live[$r['uniqueid']] = true;
+                }
+            }
+        }
+        return $live;
+    }
+
+    /** CDR rows of one trunk started in [$from, $to), read in id order and in batches. */
+    private function cdrRows($table, $columns, $idTrunk, $from, $to)
+    {
+        $lastId = 0;
+        do {
+            $rows = $this->rows(
+                "SELECT id, uniqueid, UNIX_TIMESTAMP(starttime) ts, $columns FROM $table
+                 WHERE id_trunk = ? AND starttime >= FROM_UNIXTIME(?) AND starttime < FROM_UNIXTIME(?) AND id > ?
+                 ORDER BY id LIMIT " . self::SEED_BATCH,
+                [$idTrunk, $from, $to, $lastId]
+            );
+            foreach ($rows as $r) {
+                $lastId = (int) $r['id'];
+                yield $r;
+            }
+        } while (count($rows) === self::SEED_BATCH);
+    }
+
+    /**
+     * Provider buy-rate rounding [init, inc] for a CDR's prefix: the longest
+     * provider prefix that the CDR's prefix starts with. [null, null] = raw seconds.
+     */
+    private function providerRounding($idProvider, $idPrefix)
+    {
+        $row = $this->row(
+            'SELECT r.buyrateinitblock, r.buyrateincrement FROM pkg_rate_provider r
+             JOIN pkg_prefix p ON p.id = r.id_prefix JOIN pkg_prefix c ON c.id = ?
+             WHERE r.id_provider = ? AND c.prefix LIKE CONCAT(p.prefix, \'%\')
+             ORDER BY LENGTH(p.prefix) DESC LIMIT 1',
+            [$idPrefix, $idProvider]
+        );
+        return $row ? [(int) $row['buyrateinitblock'], (int) $row['buyrateincrement']] : [null, null];
     }
 
     private static function isPaused(array $p, $ts)
